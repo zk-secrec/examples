@@ -1,0 +1,15 @@
+type N : Nat = 0x1fffffffffffffff;
+
+fn main()
+where Field[N], Field[5], Convertible[5, N], ObliviousChoice
+{ let x_pre : uint[N] $pre @prover = get_witness("x")
+; let x = wire { x_pre }
+; let y : uint[5] $pre @prover = get_witness("y")
+; let shifted : uint[N] $post @prover = match (x)	
+  { 0 => { 1 }
+  , 1 => { 2 }
+  , 2 => { 0 }
+  , _ => { let z = y; 0-1 }
+  }
+; assert_zero(shifted * (shifted - 1) * (shifted - 2))
+}

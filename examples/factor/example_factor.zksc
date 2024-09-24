@@ -1,0 +1,19 @@
+use Std::*;
+use Integer::*;
+use Inequalities::*;
+
+type N : Nat = 3647104749702663936044671300410017453855276508776292262406172562348790436137984035021;
+
+fn main() 
+where Field[N]
+{ let z : uint[N] $post @verifier = wire { get_instance("z") }
+; let x : uint[N] $post @prover = wire { get_witness("x") }
+; let y = wire { z as @prover as $pre / x as $pre }
+; assert(!eq(x, 1))
+; assert(!eq(y, 1))
+; let mut s = sizeasserter_new(((log2(N) - 1) / 2) as u64)
+; let trash = check_size(x, ref s)
+; let trash = check_size(y, ref s)
+; assert_zero(x * y - z as @prover)
+}
+

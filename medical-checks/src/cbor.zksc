@@ -1,0 +1,719 @@
+use Std::*;
+use Integer::*;
+use Bitextract::*;
+use ChrVec::*;
+use Perm::*;
+use Prob::*;
+use Inequalities::*;
+use Date::*;
+use Store::*;
+use String::*;
+use utils::*;
+
+type N : Nat = 0x1FFFFFFFFFFFFFFF;
+
+// Assumes that 0 < len <= length(bytes)
+fn bytes_to_uint[N : Nat, $S, @D](bytes : list[uint[N] $S @D], len : u64 $pre @public) -> uint[N] $S @D
+{ let base = 256
+; let rec partial_sums = for i in 0 .. len
+  { if (i == 0) { bytes[i] }
+    else { partial_sums[i - 1] * base + bytes[i] }
+  }
+; partial_sums[len - 1]
+}
+
+pub struct CborConfig 
+{ total_len: u64 $pre @public  // the number of bytes
+, val_len: u64 $pre @public    // the number of values encoded (nested included)
+, max_strlen: u64 $pre @public // maximal byte or text string length
+, max_sublen: u64 $pre @public // maximum number of items in array or pairs in map
+, max_dep: u64 $pre @public    // maximal depth of nesting
+}
+
+struct CborArrays[N : Nat, $S, @D]
+{ raw_data: list[uint[N] $S @D] // The original text followed by a sufficient number of placeholder bytes
+, val_ptrs: list[uint[N] $S @D] // Indices of initial bytes of data items in the original text
+, typs: list[uint[N] $S @D]     // Types of data items
+, vals: list[uint[N] $S @D]     // Values in data items
+, reps: list[uint[N] $S @D]     // Numbers of items in each immediate constituent (0, 1 or 2)
+, val_wids: list[uint[N] $S @D] // Numbers of bytes in values (including the initial byte)
+, up_ptrs: list[uint[N] $S @D]  // Indices (in val_ptrs) of immediate parents
+, arg_lsts: list[uint[N] $S @D] // Indices (in val_ptrs) of immediate children, grouped by the parent
+, arg_bgns: list[uint[N] $S @D] // Indices (in arg_lsts) of the first children in the increasing order
+, parents: list[uint[N] $S @D]  // Indices (in val_ptrs) of immediate parents, in the order of children in arg_lsts
+, key_inds: list[uint[N] $S @D] // Flags indicating if the corresponding data item is a key of a map
+}
+
+struct CborStores[N : Nat, $S, @D]
+{ raw_data: Store[N, $S, @D]
+, val_ptrs: Store[N, $S, @D]
+, typs: Store[N, $S, @D]
+, vals: Store[N, $S, @D]
+, val_wids: Store[N, $S, @D]
+, up_ptrs: Store[N, $S, @D]
+, arg_lsts: Store[N, $S, @D]
+, arg_bgns: Store[N, $S, @D]
+, key_inds: Store[N, $S, @D]
+}
+
+pub struct Cbor[N : Nat, $S, @D]
+{ config: CborConfig
+, arrays: CborArrays[N, $S, @D]
+, stores: CborStores[N, $S, @D]
+}
+
+fn copy_list_to_store[N : Nat, @D](inn : list[uint[N] $pre @D], ref out : Store[N, $pre, @D])
+{ for i in 0 .. length(inn) { out{#(i as uint[N] as @D)} = inn[i] }
+;
+}
+
+pub fn cbor_init_arrays[N : Nat, $S, @D](config : CborConfig) -> CborArrays[N, $S, @D]
+{ CborArrays
+  { raw_data: for i in 0 .. config.total_len + 8 + config.max_strlen { 0 }
+  , val_ptrs: for i in 0 .. config.val_len { 0 }
+  , typs: for i in 0 .. config.val_len { 0 }
+  , vals: for i in 0 .. config.val_len { 0 }
+  , reps: for i in 0 .. config.val_len { 0 }
+  , val_wids: for i in 0 .. config.val_len { 0 }
+  , up_ptrs: for i in 0 .. config.val_len { 0 }
+  , arg_bgns: for i in 0 .. config.val_len { 0 }
+  , arg_lsts: for i in 0 .. config.val_len - 1 { 0 }
+  , parents: for i in 0 .. config.val_len - 1 { 0 }
+  , key_inds: for i in 0 .. config.val_len { 0 }
+  }
+}
+
+pub fn cbor_init_stores[N : Nat, $S, @D]() -> CborStores[N, $S, @D]
+where Field[N]
+{ CborStores
+  { raw_data: store_new(true, true, false)
+  , val_ptrs: store_new(true, true, false)
+  , typs: store_new(true, true, false)
+  , vals: store_new(true, true, false)
+  , val_wids: store_new(true, true, false)
+  , up_ptrs: store_new(true, true, false)
+  , arg_bgns: store_new(true, true, false)
+  , arg_lsts: store_new(true, true, false)
+  , key_inds: store_new(true, true, false)
+  }
+}
+
+fn cbor_to_pre[N : Nat, $S, @D](ref inn : Cbor[N, $S, @D], ref out : Cbor[N, $pre, @D])
+where Field[N]
+{ out.config = inn.config
+; out.arrays.raw_data = uint_list_to_pre(inn.arrays.raw_data)
+; out.arrays.val_ptrs = uint_list_to_pre(inn.arrays.val_ptrs)
+; out.arrays.typs = uint_list_to_pre(inn.arrays.typs)
+; out.arrays.vals = uint_list_to_pre(inn.arrays.vals)
+; out.arrays.reps = uint_list_to_pre(inn.arrays.reps)
+; out.arrays.val_wids = uint_list_to_pre(inn.arrays.val_wids)
+; out.arrays.up_ptrs = uint_list_to_pre(inn.arrays.up_ptrs)
+; out.arrays.arg_bgns = uint_list_to_pre(inn.arrays.arg_bgns)
+; out.arrays.arg_lsts = uint_list_to_pre(inn.arrays.arg_lsts)
+; out.arrays.parents = uint_list_to_pre(inn.arrays.parents)
+; out.arrays.key_inds = uint_list_to_pre(inn.arrays.key_inds)
+; copy_list_to_store(out.arrays.raw_data, ref out.stores.raw_data)
+; copy_list_to_store(out.arrays.val_ptrs, ref out.stores.val_ptrs)
+; copy_list_to_store(out.arrays.typs, ref out.stores.typs)
+; copy_list_to_store(out.arrays.vals, ref out.stores.vals)
+; copy_list_to_store(out.arrays.val_wids, ref out.stores.val_wids)
+; copy_list_to_store(out.arrays.up_ptrs, ref out.stores.up_ptrs)
+; copy_list_to_store(out.arrays.arg_bgns, ref out.stores.arg_bgns)
+; copy_list_to_store(out.arrays.arg_lsts, ref out.stores.arg_lsts)
+; copy_list_to_store(out.arrays.key_inds, ref out.stores.key_inds)
+}
+
+fn is_numeric_typ[N : Nat, $S, @D](typ : uint[N] $S @D) -> bool[N] $S @D
+where Field[N]
+{ if (post $S) { if (@prover <= @D) { is_zero(typ * (typ - 1)) } else { wire { typ as $pre < 2 } } }
+  else { typ < 2 }
+}
+
+fn is_string_typ[N : Nat, $S, @D](typ : uint[N] $S @D) -> bool[N] $S @D
+where Field[N]
+{ is_numeric_typ(typ - 2)
+}
+
+fn is_compound_typ[N : Nat, $S, @D](typ : uint[N] $S @D) -> bool[N] $S @D
+where Field[N]
+{ is_numeric_typ(typ - 4)
+}
+
+fn is_tag_typ[N : Nat, $S, @D](typ : uint[N] $S @D) -> bool[N] $S @D
+where Field[N]
+{ eq(typ, 6)
+}
+
+// Assumptions: large_sizeasserter.bw = log2(N) - 2, small_sizeasserter.bw = 5
+fn cbor_compute_vals[N : Nat](ref cbor : Cbor[N, $post, @prover], ref large_sizeasserter : SizeAsserter[N, $post, @prover], ref small_sizeasserter : SizeAsserter[N, $post, @prover])
+where Field[N]
+{ let mut val_ptr = 0
+; let total_len = uint_downcast(cbor.config.total_len as uint[N]) as @prover
+; for idx in 0 .. cbor.config.val_len
+  { assert_lt(val_ptr, total_len, ref large_sizeasserter)
+  ; let idx_dc = uint_downcast(idx as uint[N]) as @prover
+  ; let init_byte = cbor.stores.raw_data{#val_ptr}
+  ; let init_bits = bitextract(init_byte, 8)
+  ; let typ = bits_to_uint(for i in 0 .. 3 { init_bits[i + 5] })
+  ; assert(!eq(typ, 7))
+  ; let indicator = bits_to_uint(for i in 0 .. 5 { init_bits[i] })
+  ; assert_lt(indicator, 28, ref small_sizeasserter)
+  ; let following = for i in 0 .. 8 { cbor.stores.raw_data{#(val_ptr + 1 + uint_downcast(i as uint[N]) as @prover)} }
+  ; let is_byt0 = lt3(indicator, 24, ref small_sizeasserter)
+  ; let is_byt1 = eq(indicator, 24)
+  ; let is_byt2 = eq(indicator, 25)
+  ; let is_byt4 = eq(indicator, 26)
+  ; let val = uint_cond(is_byt0, indicator, 
+              uint_cond(is_byt1, bytes_to_uint(following, 1),
+              uint_cond(is_byt2, bytes_to_uint(following, 2),
+              uint_cond(is_byt4, bytes_to_uint(following, 4),
+              bytes_to_uint(following, 8)))))
+  ; let rep = uint_cond(is_compound_typ(typ), val * (typ - 3), is_tag_typ(typ) as uint[N])
+  ; let val_wid = uint_cond(is_byt0, 1, 
+                  uint_cond(is_byt1, 2,
+                  uint_cond(is_byt2, 3,
+                  uint_cond(is_byt4, 5,
+                  9))))
+  ; cbor.arrays.val_ptrs[idx] = val_ptr
+  ; cbor.arrays.typs[idx] = typ
+  ; cbor.arrays.vals[idx] = val
+  ; cbor.arrays.reps[idx] = rep
+  ; cbor.arrays.val_wids[idx] = val_wid
+  ; cbor.stores.val_ptrs{#idx_dc} = val_ptr
+  ; cbor.stores.typs{#idx_dc} = typ
+  ; cbor.stores.vals{#idx_dc} = val
+  ; cbor.stores.val_wids{#idx_dc} = val_wid
+  ; let str_flag = is_string_typ(typ)
+  ; val_ptr = uint_cond(str_flag, val_ptr + val_wid + val, val_ptr + val_wid)
+  }
+; assert_zero(val_ptr - total_len)
+; let val_len = 1 + sum(cbor.arrays.reps)
+; assert_zero(val_len - uint_downcast(cbor.config.val_len as uint[N]) as @prover)
+}
+
+unchecked eff * -> * -> * -> * ! @D
+fn cbor_compute_rel_inds_helper[N : Nat, @D](reps_pre : list[uint[N] $pre @D] $pre @D, ref rel_inds : list[uint[N] $pre @D] $pre @D, ref idx : u64 $pre @D)
+where Field[N]
+{ rel_inds[idx] = rel_inds[idx] + 1
+; let rep = reps_pre[idx]
+; for arg in 0 .. rep as u64
+  { idx = idx + 1
+  ; cbor_compute_rel_inds_helper(reps_pre, ref rel_inds, ref idx)
+  }
+; rel_inds[idx] = rel_inds[idx] - 1
+}
+
+fn cbor_compute_rel_inds_pre[N : Nat, @D](reps_pre : list[uint[N] $pre @D] $pre @D) -> list[uint[N] $pre @D] $pre @D
+where Field[N]
+{ let mut rel_inds = for i in 0 .. length(reps_pre) { 0 }
+; let mut idx = 0
+; cbor_compute_rel_inds_helper(reps_pre, ref rel_inds, ref idx)
+; rel_inds
+}
+
+fn cbor_compute_rel_inds[N : Nat, $S, @D](ref cbor : Cbor[N, $S, @D]) -> list[uint[N] $S @D]
+where Field[N]
+{ let reps_pre = uint_list_to_pre(cbor.arrays.reps) as @D
+; let rel_inds_pre = cbor_compute_rel_inds_pre(reps_pre) 
+; for i in 0 .. cbor.config.val_len
+  { uint_downcast(rel_inds_pre[i as @D])
+  }
+}
+
+fn check_up_ptrs[N : Nat](ref cbor : Cbor[N, $post, @prover])
+where Field[N], Challenge[N]
+{ for k in 0 .. repetition_times(log2(N) - log2(cbor.config.val_len as uint), 80)
+  { let r = (wire { challenge(1)[0] }) as @prover
+  ; let mut p1 = 1
+  ; for i in 0 .. cbor.config.val_len - 1
+    { let i_dc = (wire { i as uint[N] }) as @prover
+    ; let rep = cbor.arrays.reps[i]
+    ; let pwr = pow(r - i_dc, rep, log2(cbor.config.val_len as uint) as u64 + 1)
+    ; p1 = p1 * pwr
+    }
+  ; let mut p2 = 1
+  ; for i in 1 .. cbor.config.val_len
+    { p2 = p2 * (r - cbor.arrays.up_ptrs[i])
+    }
+  ; assert_zero(p1 - p2)
+  }
+;
+}
+
+fn cbor_compute_up_ptrs[N : Nat, $S, @D](ref cbor : Cbor[N, $S, @D])
+where Field[N], Challenge[N]
+{ let rel_inds = cbor_compute_rel_inds(ref cbor)
+; cbor.arrays.up_ptrs[0] = 0
+; cbor.stores.up_ptrs{#(0 : uint[N] $S @D)} = 0
+; let mut i_dc = 0
+; for i in 1 .. cbor.config.val_len
+  { let prev_i_dc = i_dc
+  ; i_dc = uint_downcast(i as uint[N]) as @D
+  ; let rec up_chain = for l in 0 .. cbor.config.max_dep
+                       { if (l == 0) { prev_i_dc }
+                         else { cbor.stores.up_ptrs{#(up_chain[l - 1])} }
+                       }
+  ; cbor.arrays.up_ptrs[i] = element(up_chain, 1 - rel_inds[i - 1])
+  ; cbor.stores.up_ptrs{#i_dc} = cbor.arrays.up_ptrs[i]
+  }
+; if (post $S) { if (@prover <= @D) { check_up_ptrs(ref cbor) } else {} }
+  else {} 
+}
+
+fn cbor_compute_arg_bgns[N : Nat, $S, @D](ref cbor : Cbor[N, $S, @D])
+where Field[N]
+{ let mut i_dc = 0
+; for i in 0 .. cbor.config.val_len
+  { i_dc = uint_downcast(i as uint[N]) as @D
+  ; if (i == 0) { cbor.arrays.arg_bgns[i] = 0 }
+    else 
+    { let prev_bgn = cbor.arrays.arg_bgns[i - 1]
+    ; let prev_rep = cbor.arrays.reps[i - 1]
+    ; cbor.arrays.arg_bgns[i] = prev_bgn + prev_rep
+    }
+  ; cbor.stores.arg_bgns{#i_dc} = cbor.arrays.arg_bgns[i]
+  }
+;
+}
+
+fn cbor_compute_arg_lsts_pre[N : Nat, @D](up_ptrs : list[uint[N] $pre @D] $pre @D, arg_bgns : list[uint[N] $pre @D] $pre @D) -> list[uint[N] $pre @D] $pre @D
+where Field[N]
+{ let mut idxs = for k in 0 .. length(up_ptrs) { 0 }
+; let mut arg_lsts = for i in 0 .. length(up_ptrs) - 1 { 0 }
+; for i in 1 .. length(up_ptrs)
+  { let up_ptr = up_ptrs[i] as u64
+  ; let idx = arg_bgns[up_ptr] as u64 + idxs[up_ptr]
+  ; arg_lsts[idx] = i as uint[N]
+  ; idxs[up_ptr] = idxs[up_ptr] + 1
+  }
+; arg_lsts
+}
+
+// Assumption: sizeasserter.bw = log2(N) - 2
+fn check_arg_lsts_and_parents[N : Nat](ref cbor : Cbor[N, $post, @prover], ref sizeasserter : SizeAsserter[N, $post, @prover])
+where Field[N]
+{ for i in 0 .. cbor.config.val_len - 1
+  { let arg_ptr = cbor.arrays.arg_lsts[i]
+  ; let parent = cbor.arrays.parents[i]
+  ; if (0 < cbor.config.val_len - 1)
+    { assert(!is_zero(cbor.arrays.arg_lsts[i]))
+    }
+  ; if (i + 1 < cbor.config.val_len - 1)
+    { assert(eq(parent, cbor.arrays.parents[i + 1]) & lt3(arg_ptr, cbor.arrays.arg_lsts[i + 1], ref sizeasserter) | lt3(parent, cbor.arrays.parents[i + 1], ref sizeasserter))
+    }
+  }
+;
+}
+
+// Assumption: sizeasserter.bw = log2(N) - 2
+fn cbor_compute_arg_lsts_and_parents[N : Nat](ref cbor : Cbor[N, $post, @prover], ref sizeasserter : SizeAsserter[N, $post, @prover]) 
+where Field[N]
+{ let up_ptrs_pre = uint_list_to_pre(cbor.arrays.up_ptrs) as @prover
+; let arg_bgns_pre = uint_list_to_pre(cbor.arrays.arg_bgns) as @prover
+; let arg_lsts_pre = cbor_compute_arg_lsts_pre(up_ptrs_pre, arg_bgns_pre)
+; for i in 0 .. cbor.config.val_len - 1
+  { let i_dc = uint_downcast(i as uint[N]) as @prover
+  ; cbor.arrays.arg_lsts[i] = uint_downcast(arg_lsts_pre[i as @prover])
+  ; cbor.stores.arg_lsts{#i_dc} = cbor.arrays.arg_lsts[i]
+  ; cbor.arrays.parents[i] = cbor.stores.up_ptrs{#(cbor.arrays.arg_lsts[i])}
+  }
+; check_arg_lsts_and_parents(ref cbor, ref sizeasserter)
+}
+
+// key_inds[i] is 1 if the value No i corresponds to a key of a map, otherwise 0
+fn cbor_compute_key_inds[N : Nat, $S, @D](ref cbor : Cbor[N, $S, @D])
+where Field[N]
+{ let rec arg_ctrs = for i in 0 .. cbor.config.val_len - 1
+  { if (i == 0) { 1 }
+    else { uint_cond(eq(cbor.arrays.parents[i - 1], cbor.arrays.parents[i]), 1 - arg_ctrs[i - 1], 1) }
+  }
+; cbor.stores.key_inds{#(0 : uint[N] $S @D)} = 0
+; for i in 0 .. cbor.config.val_len - 1
+  { let idx = cbor.arrays.arg_lsts[i]
+  ; let parent_typ = cbor.stores.typs{#(cbor.arrays.parents[i])}
+  ; cbor.stores.key_inds{#idx} = eq(parent_typ, 5) as uint[N] * arg_ctrs[i]
+  }
+; for i in 0 .. cbor.config.val_len
+  { let i_dc = uint_downcast(i as uint[N]) as @D
+  ; if (i == 0) { cbor.arrays.key_inds[i] = 0 }
+    else { cbor.arrays.key_inds[i] = cbor.stores.key_inds{#i_dc}}
+  }
+;
+}
+
+fn sort_triples[N : Nat, $S, @D](ref cbor : Cbor[N, $S, @D], r : uint[N] $S @D) -> list[list[uint[N] $S @D]]
+where Field[N], Challenge[N]
+{ let typs = cbor.arrays.typs
+; let vals = for i in 0 .. cbor.config.val_len
+  { uint_cond
+    ( is_numeric_typ(typs[i])
+    , cbor.arrays.vals[i]
+    , uint_cond
+      ( is_string_typ(typs[i])
+      , eval_string(cbor_get_str_pre(ref cbor, i), r)
+      , 0
+      )
+    )
+  }
+; let up_ptrs = cbor.arrays.up_ptrs
+; let key_inds = cbor.arrays.key_inds
+; let xss = [typs, vals, up_ptrs, key_inds]
+; let vals_perm = __get_sorting_permutation(for i in 0 .. cbor.config.val_len { xss[1][i] as $pre as uint })
+; let yss = apply_perm(xss, vals_perm)
+; let up_ptrs_perm = __get_sorting_permutation(for i in 0 .. cbor.config.val_len { yss[2][i] as $pre as uint })
+; let zss = apply_perm(yss, up_ptrs_perm)
+; let key_inds_perm = __get_sorting_permutation(for i in 0 .. cbor.config.val_len { zss[3][i] as $pre as uint })
+; apply_perm(zss, key_inds_perm)
+}
+
+fn uniq_inds[N : Nat, $S, @D](tss : list[list[uint[N] $S @D]], ess : list[list[bool[N] $S @D]]) -> list[uint[N] $S @D]
+where Field[N]
+{ let vals_sorted = tss[1]
+; let up_ptrs_sorted = tss[2]
+; let key_inds_sorted = tss[3]
+; for i in 0 .. length(key_inds_sorted) - 1
+  { let key_ind = key_inds_sorted[i]
+  ; let up_ptrs_eq = ess[1][i] as uint[N]
+  ; let vals_eq = ess[0][i] as uint[N]
+  ; key_ind * up_ptrs_eq * vals_eq
+  }
+}
+
+// Assumes that cbor.config.val_len <= N
+unchecked eff * -> * -> * ! @D
+fn compute_base_helper[N : Nat, @D](ref cbor : Cbor[N, $pre, @D], r : uint[N] $pre @D) -> uint[N] $pre @D
+where Field[N], Challenge[N]
+{ let sorted = sort_triples(ref cbor, r)
+; let equalities = for k in 0 .. 2 { for i in 0 .. length(sorted[k + 1]) - 1 { eq(sorted[k + 1][i], sorted[k + 1][i + 1]) } }
+; let uniqs : list[uint[N] $pre @D] = uniq_inds(sorted, equalities)
+; if (sum(uniqs) == 0) { r }
+  else { compute_base_helper(ref cbor, r + 1) }
+}
+
+// Assumes that cbor.config.val_len <= N
+fn compute_base[N : Nat, @D](ref cbor : Cbor[N, $pre, @D]) -> uint[N] $pre @D
+where Field[N], Challenge[N]
+{ compute_base_helper(ref cbor, 1)
+}
+
+fn check_sorted[N : Nat](tss : list[list[uint[N] $post @prover]], es : list[bool[N] $post @prover], ref large_sizeasserter : SizeAsserter[N, $post, @prover], ref medium_sizeasserter : SizeAsserter[N, $post, @prover])
+where Field[N]
+{ let l = length(tss[1])
+; let str_vals_bits = for i in 0 .. l { check_size(tss[1][i], ref large_sizeasserter) }
+; let up_ptrs_bits = for i in 0 .. l { Checked { val: tss[2][i] } }
+; let key_inds = for i in 0 .. l { uint_to_bool(tss[3][i]) }
+; for i in 0 .. l - 1
+  { assert(impli(key_inds[i], key_inds[i + 1]))
+  ; assert(impli(impli(key_inds[i + 1], key_inds[i]), le3'(up_ptrs_bits[i], up_ptrs_bits[i + 1], ref medium_sizeasserter)))
+  ; assert(impli(impli(key_inds[i + 1], key_inds[i]), impli(es[i], le3'(str_vals_bits[i], str_vals_bits[i + 1], ref large_sizeasserter))))
+  }
+; 
+}
+
+fn check_key_typs[N : Nat, $S, @D](tss : list[list[uint[N] $S @D]], es : list[bool[N] $S @D])
+where Field[N]
+{ let typs = tss[0]
+; let key_inds = for i in 0 .. length(tss[3]) { uint_to_bool(tss[3][i]) }
+; for i in 0 .. length(es)
+  { univ_conditional_assert_zero(key_inds[i] & es[i], typs[i] - typs[i + 1])
+  ; univ_conditional_assert_zero(key_inds[i] & !es[i], typs[i + 1] * (typs[i + 1] - 3))
+  }
+;
+}
+
+// Assumes that cbor.config.val_len <= N
+fn check_keys_uniq[N : Nat](ref cbor : Cbor[N, $post, @prover], ref large_sizeasserter : SizeAsserter[N, $post, @prover], ref medium_sizeasserter : SizeAsserter[N, $post, @prover])
+where Field[N], Challenge[N]
+{ let mut cbor_pre = Cbor
+  { config: cbor.config
+  , arrays: cbor_init_arrays(cbor.config)
+  , stores: cbor_init_stores()
+  }
+; cbor_to_pre(ref cbor, ref cbor_pre)
+; let r = wire { compute_base(ref cbor_pre) }
+; let sorted = sort_triples(ref cbor, r)
+; let equalities = for k in 0 .. 2 { for i in 0 .. length(sorted[k + 1]) - 1 { eq(sorted[k + 1][i], sorted[k + 1][i + 1]) } }
+; check_sorted(sorted, equalities[1], ref large_sizeasserter, ref medium_sizeasserter)
+; univ_assert_zero(sum(uniq_inds(sorted, equalities)))
+; check_key_typs(sorted, equalities[1])
+}
+
+fn check_tags[N : Nat, $S, @D](ref cbor : Cbor[N, $S, @D])
+where Field[N]
+{ let val_len = cbor.config.val_len
+; for i in 0 .. val_len
+  { let typ = cbor.arrays.typs[i]
+  ; let val = cbor.arrays.vals[i]
+  ; let up_ptr = cbor.arrays.up_ptrs[i]
+  ; let tag_flag = is_tag_typ(typ)
+  ; let legal_tag_flag = is_zero((val - 24) * (val - 18013))
+  ; let next_bstr_flag = if (i + 1 < val_len) { eq(cbor.arrays.typs[i + 1], 2) } else { false }
+  ; let next_tstr_flag = if (i + 1 < val_len) { eq(cbor.arrays.typs[i + 1], 3) } else { false }
+  ; let next_date_flag = if (i + 1 < val_len) { is_full_date(cbor_get_str_pre(ref cbor, i + 1)) } else { false }
+  ; univ_assert(impli(tag_flag, legal_tag_flag))
+  ; univ_assert(impli(tag_flag, impli(eq(val, 24), next_bstr_flag)))
+  ; univ_assert(impli(tag_flag, impli(eq(val, 18013), next_tstr_flag & next_date_flag)))
+  }
+;
+}
+
+// Assumes that cbor contains empty stores but config has been already evaluated and array lengths are right
+pub fn cbor_init[N : Nat](raw_data : list[uint[N] $post @prover], ref cbor : Cbor[N, $post, @prover], ref large_sizeasserter : SizeAsserter[N, $post, @prover], ref small_sizeasserter : SizeAsserter[N, $post, @prover], ref medium_sizeasserter : SizeAsserter[N, $post, @prover])
+where Field[N], Challenge[N]
+{ let raw_extended = append(raw_data, for i in 0 .. 8 + cbor.config.max_strlen { 255 })
+; for i in 0 .. length(raw_extended) 
+  { let i_dc = uint_downcast(i as uint[N]) as @prover
+  ; cbor.arrays.raw_data[i] = raw_extended[i]
+  ; cbor.stores.raw_data{#i_dc} = raw_extended[i]
+  }
+; cbor_compute_vals(ref cbor, ref large_sizeasserter, ref small_sizeasserter)
+; cbor_compute_up_ptrs(ref cbor)
+; cbor_compute_arg_bgns(ref cbor)
+; cbor_compute_arg_lsts_and_parents(ref cbor, ref large_sizeasserter)
+; cbor_compute_key_inds(ref cbor)
+; check_keys_uniq(ref cbor, ref large_sizeasserter, ref medium_sizeasserter)
+; check_tags(ref cbor)
+}
+
+pub fn cbor_get_typ[N : Nat, $S, @D](ref cbor : Cbor[N, $S, @D], ptr : uint[N] $S @D) -> uint[N] $S @D
+where Field[N]
+{ cbor.stores.typs{#ptr}
+}
+
+pub fn cbor_get_val[N : Nat, $S, @D](ref cbor : Cbor[N, $S, @D], ptr : uint[N] $S @D) -> uint[N] $S @D
+where Field[N]
+{ cbor.stores.vals{#ptr}
+}
+
+pub fn cbor_get_bytes_pre[N : Nat, $S, @D](ref cbor : Cbor[N, $S, @D], idx : u64 $pre @public, len : u64 $pre @public) -> list[uint[N] $S @D]
+where Field[N]
+{ let val_ptr = cbor.arrays.val_ptrs[idx]
+; let val_wid = cbor.arrays.val_wids[idx]
+; for i in 0 .. len { cbor.stores.raw_data{#(val_ptr + val_wid + uint_downcast(i as uint[N]) as @D)} }
+}
+
+pub fn cbor_get_bytes_pre_with_check[N : Nat, $S, @D](ref cbor : Cbor[N, $S, @D], idx : u64 $pre @public, len : u64 $pre @public) -> list[uint[N] $S @D]
+where Field[N]
+{ let typ = cbor.arrays.typs[idx]
+; let val = cbor.arrays.vals[idx]
+; univ_assert_zero((typ - 2) * (typ - 3))
+; univ_assert_zero(val - uint_downcast(len as uint[N]) as @D)
+; cbor_get_bytes_pre(ref cbor, idx, len)
+}
+
+pub fn cbor_get_bytes[N : Nat, $S, @D](ref cbor : Cbor[N, $S, @D], ptr : uint[N] $S @D, len : u64 $pre @public) -> list[uint[N] $S @D]
+where Field[N]
+{ let val_ptr = cbor.stores.val_ptrs{#ptr}
+; let val_wid = cbor.stores.val_wids{#ptr}
+; for i in 0 .. len { cbor.stores.raw_data{#(val_ptr + val_wid + uint_downcast(i as uint[N]) as @D)} }
+}
+
+pub fn cbor_get_bytes_with_check[N : Nat, $S, @D](ref cbor : Cbor[N, $S, @D], ptr : uint[N] $S @D, len : u64 $pre @public) -> list[uint[N] $S @D]
+where Field[N]
+{ let typ = cbor.stores.typs{#ptr}
+; let val = cbor.stores.vals{#ptr}
+; univ_assert_zero(typ - 2)
+; univ_assert_zero(val - uint_downcast(len as uint[N]) as @D)
+; cbor_get_bytes(ref cbor, ptr, len)
+}
+
+pub fn cbor_get_str_pre[N : Nat, $S, @D](ref cbor : Cbor[N, $S, @D], idx : u64 $pre @public) -> String[$S, @D, N]
+where Field[N]
+{ let val_ptr = cbor.arrays.val_ptrs[idx]
+; let val_wid = cbor.arrays.val_wids[idx]
+; let val = cbor.arrays.vals[idx]
+; String
+  { chars: for i in 0 .. cbor.config.max_strlen { cbor.stores.raw_data{#(val_ptr + val_wid + uint_downcast(i as uint[N]) as @D)} }
+  , len: val
+  }
+}
+
+pub fn cbor_get_str_pre_with_check[N : Nat, $S, @D](ref cbor : Cbor[N, $S, @D], idx : u64 $pre @public) -> String[$S, @D, N]
+where Field[N]
+{ let typ = cbor.arrays.typs[idx]
+; univ_assert_zero(typ - 3)
+; cbor_get_str_pre(ref cbor, idx)
+}
+
+pub fn cbor_get_str[N : Nat, $S, @D](ref cbor : Cbor[N, $S, @D], ptr : uint[N] $S @D) -> String[$S, @D, N]
+where Field[N]
+{ let val_ptr = cbor.stores.val_ptrs{#ptr}
+; let val_wid = cbor.stores.val_wids{#ptr}
+; let val = cbor.stores.vals{#ptr}
+; String
+  { chars: for i in 0 .. cbor.config.max_strlen { cbor.stores.raw_data{#(val_ptr + val_wid + uint_downcast(i as uint[N]) as @D)} }
+  , len: val
+  }
+}
+
+pub fn cbor_get_str_with_check[N : Nat, $S, @D](ref cbor : Cbor[N, $S, @D], ptr : uint[N] $S @D) -> String[$S, @D, N]
+where Field[N]
+{ let typ = cbor.stores.typs{#ptr}
+; univ_assert_zero(typ - 3)
+; cbor_get_str(ref cbor, ptr)
+}
+
+pub fn cbor_lookup_array[N : Nat, $S, @D](ref cbor : Cbor[N, $S, @D], ptr : uint[N] $S @D, idx : uint[N] $S @D) -> uint[N] $S @D
+where Field[N]
+{ let arg_bgn = cbor.stores.arg_bgns{#ptr}
+; cbor.stores.arg_lsts{#(arg_bgn + idx)}
+}
+
+pub fn cbor_lookup_array_with_check[N : Nat](ref cbor : Cbor[N, $post, @prover], ptr : uint[N] $post @prover, idx : uint[N] $post @prover, ref sizeasserter : SizeAsserter[N, $post, @prover]) -> uint[N] $post @prover
+where Field[N]
+{ let val = cbor.stores.vals{#ptr}
+; let typ = cbor.stores.typs{#ptr}
+; assert_zero(typ - 4)
+; assert_lt(idx, val, ref sizeasserter)
+; cbor_lookup_array(ref cbor, ptr, idx)
+}
+
+// Assumes that all keys are strings
+pub fn cbor_lookup_map_strkey[N : Nat, $S, @D](ref cbor : Cbor[N, $S, @D], ptr : uint[N] $S @D, str : list[uint[N] $S @D]) -> uint[N] $S @D
+where Field[N]
+{ let len = min_pre(length(str), cbor.config.max_strlen)
+; let str_str = string_with_native_len(str)
+; let n = cbor.config.max_sublen
+; let arg_bgn = cbor.stores.arg_bgns{#ptr}
+; let str_args = for i in 0 .. n { arg_bgn + uint_downcast((i + i) as uint[N]) as @D }
+; let map_len = cbor.stores.vals{#ptr}
+; let chr_vec = chrvec_lt(n, map_len)
+; let ptr_idxs = for i in 0 .. n { chr_vec[i] * str_args[i] + (1 - chr_vec[i]) * arg_bgn }
+; let flag_list = for i in 0 .. n
+                  { let sub_ptr = cbor.stores.arg_lsts{#(ptr_idxs[i])}
+                  ; if (i == 0) { univ_assert_zero(cbor_get_typ(ref cbor, sub_ptr) - 3) }
+                  ; chr_vec[i] * string_eq(str_str, cbor_get_str(ref cbor, sub_ptr), len) as uint[N]
+                  }
+; let res = scalar_prod(flag_list, for i in 0 .. n { cbor.stores.arg_lsts{#(ptr_idxs[i] + 1)}}, n)
+; univ_assert(!is_zero(res))
+; res
+}
+
+pub fn cbor_lookup_map_strkey_with_check[N : Nat, $S, @D](ref cbor : Cbor[N, $S, @D], ptr : uint[N] $S @D, str : list[uint[N] $S @D]) -> uint[N] $S @D
+where Field[N]
+{ let typ = cbor.stores.typs{#ptr}
+; univ_assert_zero(typ - 5)
+; cbor_lookup_map_strkey(ref cbor, ptr, str)
+}
+
+// Assumes that all keys are uints
+pub fn cbor_lookup_map_intkey[N : Nat, $S, @D](ref cbor : Cbor[N, $S, @D], ptr : uint[N] $S @D, key : uint[N] $S @D) -> uint[N] $S @D
+where Field[N]
+{ let n = cbor.config.max_sublen
+; let arg_bgn = cbor.stores.arg_bgns{#ptr}
+; let key_args = for i in 0 .. n { arg_bgn + uint_downcast((i + i) as uint[N]) as @D }
+; let map_len = cbor.stores.vals{#ptr}
+; let chr_vec = chrvec_lt(n, map_len)
+; let ptr_idxs = for i in 0 .. n { chr_vec[i] * key_args[i] + (1 - chr_vec[i]) * arg_bgn }
+; let flag_list = for i in 0 .. n
+                  { let sub_ptr = cbor.stores.arg_lsts{#(ptr_idxs[i])}
+                  ; if (i == 0) { univ_assert_zero(cbor_get_typ(ref cbor, sub_ptr)) }
+                  ; chr_vec[i] * eq(key, cbor_get_val(ref cbor, sub_ptr)) as uint[N]
+                  }
+; let res = scalar_prod(flag_list, for i in 0 .. n { cbor.stores.arg_lsts{#(ptr_idxs[i] + 1)} }, n)
+; univ_assert(!is_zero(res))
+; res
+}
+
+pub fn cbor_lookup_map_intkey_with_check[N : Nat, $S, @D](ref cbor : Cbor[N, $S, @D], ptr : uint[N] $S @D, key : uint[N] $S @D) -> uint[N] $S @D
+where Field[N]
+{ let typ = cbor.stores.typs{#ptr}
+; univ_assert_zero(typ - 5)
+; cbor_lookup_map_intkey(ref cbor, ptr, key)
+}
+
+pub fn cbor_lookup_tagged[N : Nat, $S, @D](ref cbor : Cbor[N, $S, @D], ptr : uint[N] $S @D) -> uint[N] $S @D
+where Field[N]
+{ ptr + 1
+}
+
+pub fn cbor_lookup_tagged_with_check[N : Nat, $S, @D](ref cbor : Cbor[N, $S, @D], ptr : uint[N] $S @D) -> uint[N] $S @D
+where Field[N]
+{ let typ = cbor.stores.typs{#ptr}
+; univ_assert_zero(typ - 6)
+; cbor_lookup_tagged(ref cbor, ptr)
+}
+
+pub fn cbor_get_date_with_check[N : Nat, $S, @D](ref cbor : Cbor[N, $S, @D], ptr : uint[N] $S @D) -> Date[$S, @D, N]
+where Field[N]
+{ let date_ptr = cbor_lookup_tagged_with_check(ref cbor, ptr)
+; let val = cbor.stores.vals{#ptr}
+; univ_assert_zero(val - 18013)
+; let date_str = cbor_get_str_with_check(ref cbor, date_ptr)
+; univ_assert(is_full_date(date_str))
+; parse_full_date(date_str)
+}
+
+/**
+ *
+ * For testing only
+ */
+
+fn check_array(prover_arr : list[uint[N] $post @prover], verifier_arr : list[uint[N] $post @verifier])
+where Field[N]
+{ assert(wire { (length(prover_arr) == length(verifier_arr)) as bool[N] })
+; for i in 0 .. length(verifier_arr)
+  { assert_zero(prover_arr[i] - (verifier_arr[i]) as @prover)
+  }
+;
+}
+
+fn check_store(ref prover_sto : Store[N, $post, @prover], verifier_arr : list[uint[N] $post @verifier])
+where Field[N]
+{ for i in 0 .. length(verifier_arr)
+  { assert_zero(prover_sto{#((wire { i as uint[N] }) as @prover)} - (verifier_arr[i]) as @prover)
+  }
+;
+}
+
+fn main() 
+where Field[N], Challenge[N], Vectorization
+{ let total_len = get_public("total_len")
+; let val_len = get_public("val_len")
+; let max_strlen = get_public("max_strlen")
+; let max_sublen = get_public("max_sublen")
+; let max_dep = get_public("max_dep")
+; let config = CborConfig { total_len: total_len, val_len: val_len, max_strlen: max_strlen, max_sublen: max_sublen, max_dep: max_dep }
+; let raw_data_pre : list[uint[N] $pre @prover] $pre @prover = get_witness("raw_data")
+; let raw_data : list[uint[N] $post @prover] = for i in 0 .. total_len { wire { raw_data_pre[i as @prover] } }
+; let val_ptrs_pre : list[uint[N] $pre @verifier] $pre @verifier = get_instance("val_ptrs")
+; let typs_pre : list[uint[N] $pre @verifier] $pre @verifier = get_instance("typs")
+; let vals_pre : list[uint[N] $pre @verifier] $pre @verifier = get_instance("vals")
+; let val_wids_pre : list[uint[N] $pre @verifier] $pre @verifier = get_instance("val_wids")
+; let up_ptrs_pre : list[uint[N] $pre @verifier] $pre @verifier = get_instance("up_ptrs")
+; let arg_bgns_pre : list[uint[N] $pre @verifier] $pre @verifier = get_instance("arg_bgns")
+; let arg_lsts_pre : list[uint[N] $pre @verifier] $pre @verifier = get_instance("arg_lsts")
+; let key_inds_pre : list[uint[N] $pre @verifier] $pre @verifier = get_instance("key_inds")
+; let val_ptrs : list[uint[N] $post @verifier] = for i in 0 .. val_len { wire { val_ptrs_pre[i as @verifier] } }
+; let typs : list[uint[N] $post @verifier] = for i in 0 .. val_len { wire { typs_pre[i as @verifier] } }
+; let vals : list[uint[N] $post @verifier] = for i in 0 .. val_len { wire { vals_pre[i as @verifier] } }
+; let val_wids : list[uint[N] $post @verifier] = for i in 0 .. val_len { wire { val_wids_pre[i as @verifier] } }
+; let up_ptrs : list[uint[N] $post @verifier] = for i in 0 .. val_len { wire { up_ptrs_pre[i as @verifier] } }
+; let arg_bgns : list[uint[N] $post @verifier] = for i in 0 .. val_len { wire { arg_bgns_pre[i as @verifier] } }
+; let arg_lsts : list[uint[N] $post @verifier] = for i in 0 .. val_len - 1 { wire { arg_lsts_pre[i as @verifier] } }
+; let key_inds : list[uint[N] $post @verifier] = for i in 0 .. val_len { wire { key_inds_pre[i as @verifier] } }
+; let mut large_sizeasserter : SizeAsserter[N, $post, @prover] = sizeasserter_new(log2(N) as u64 - 2)
+; let mut small_sizeasserter : SizeAsserter[N, $post, @prover] = sizeasserter_new(5)
+; let mut medium_sizeasserter : SizeAsserter[N, $post, @prover] = sizeasserter_new(log2(val_len as uint) as u64 + 1)
+; let arrays : CborArrays[N, $post, @prover] = cbor_init_arrays(config)
+; let stores : CborStores[N, $post, @prover] = cbor_init_stores()
+; let mut cbor : Cbor[N, $post, @prover] = Cbor { config: config, arrays: arrays, stores: stores }
+; cbor_init(raw_data, ref cbor, ref large_sizeasserter, ref small_sizeasserter, ref medium_sizeasserter)
+; check_array(cbor.arrays.val_ptrs, val_ptrs)
+; check_store(ref cbor.stores.val_ptrs, val_ptrs)
+; check_array(cbor.arrays.typs, typs)
+; check_store(ref cbor.stores.typs, typs)
+; check_array(cbor.arrays.vals, vals)
+; check_store(ref cbor.stores.vals, vals)
+; check_array(cbor.arrays.val_wids, val_wids)
+; check_store(ref cbor.stores.val_wids, val_wids)
+; check_array(cbor.arrays.up_ptrs, up_ptrs)
+; check_store(ref cbor.stores.up_ptrs, up_ptrs)
+; check_array(cbor.arrays.arg_bgns, arg_bgns)
+; check_store(ref cbor.stores.arg_bgns, arg_bgns)
+; check_array(cbor.arrays.arg_lsts, arg_lsts)
+; check_store(ref cbor.stores.arg_lsts, arg_lsts)
+; check_array(cbor.arrays.key_inds, key_inds)
+; check_store(ref cbor.stores.key_inds, key_inds)
+;
+}

@@ -1,0 +1,62 @@
+use Vec::*;
+use Std::*;
+
+type N : Nat = 1030307;
+
+fn main() where Field[N], Vectorization {
+    let xs : arr[uint[N] $post @prover] = freeze([2, 6, 5]);
+    let ys : arr[uint[N] $post @prover] = freeze([7, 6, 4]);
+    let xs2 : arr[uint[N] $post @prover] = freeze([5, -7, 0]);
+    let x : uint[N] $post @prover = 6;
+    let len : u64 $pre @public = 19; // 2^(len+1) must not be greater than the modulus
+
+    // Functions returning an integer vector:
+    assert_eq_uv(xs +. ys, freeze([9, 12, 9]));
+    assert_eq_uv(xs *. ys, freeze([14, 36, 20]));
+    assert_eq_uv(add_uint_uv(x, xs), freeze([8, 12, 11]));
+    assert_eq_uv(add_preuint_uv(6, xs), freeze([8, 12, 11]));
+    assert_eq_uv(mul_uint_uv(x, xs), freeze([12, 36, 30]));
+    assert_eq_uv(mul_preuint_uv(6, xs), freeze([12, 36, 30]));
+    assert_eq_uv(negate_uv(xs), freeze([-2, -6, -5]));
+    assert_eq_uv(sub_uv(xs, ys), freeze([-5, 0, 1]));
+    assert_eq_uv(max_uv(xs, ys, len), freeze([7, 6, 5]));
+    assert_eq_uv(max_uint_uv(x, ys, len), freeze([7, 6, 6]));
+    assert_eq_uv(min_uv(xs, ys, len), freeze([2, 6, 4]));
+    assert_eq_uv(min_uint_uv(x, ys, len), freeze([6, 6, 4]));
+    assert_eq_uv(abs_uv(xs2, len), freeze([5, 7, 0]));
+
+    // Functions returning a vector whose elements are 0 or 1:
+    assert_eq_uv(ge_uv(xs, ys, len), freeze([0, 1, 1]));
+    assert_eq_uv(ge_uv_uint(ys, x, len), freeze([1, 1, 0]));
+    assert_eq_uv(le_uv(xs, ys, len), freeze([1, 1, 0]));
+
+    assert_eq_uv(le_uv_uint(ys, x, len), freeze([0, 1, 1]));
+    assert_eq_uv(gt_uv(xs, ys, len), freeze([0, 0, 1]));
+    assert_eq_uv(gt_uv_uint(ys, x, len), freeze([1, 0, 0]));
+    assert_eq_uv(lt_uv(xs, ys, len), freeze([1, 0, 0]));
+    assert_eq_uv(lt_uv_uint(ys, x, len), freeze([0, 0, 1]));
+    assert_eq_uv(is_nonnegative_uv(xs2, len), freeze([1, 0, 1]));
+
+    // Functions returning a scalar:
+    assert_zero(sum_uv(xs) - 13);
+    assert_zero(scalar_prod_uv(xs, ys) - 70);
+
+    // Bitextract:
+    let bitss = bitextract_uv(xs, 4);
+    assert_eq_uv(bitss[0], freeze([0, 0, 1]));
+    assert_eq_uv(bitss[1], freeze([1, 1, 0]));
+    assert_eq_uv(bitss[2], freeze([0, 1, 1]));
+    assert_eq_uv(bitss[3], freeze([0, 0, 0]));
+
+    // Assertions:
+    assert_lt_uv(xs, freeze([3, 8, 10]), len);
+    assert_zero_uv(bitss[3]);
+    assert_one_uv(add_preuint_uv(1, bitss[3]));
+    check_bit_uv(bitss[2]);
+
+    // Boolean operations on vectors whose elements are 0 or 1:
+    assert_eq_uv(and_uv(bitss[1], bitss[2]), freeze([0, 1, 0]));
+    assert_eq_uv(xor_uv(bitss[1], bitss[2]), freeze([1, 0, 1]));
+    assert_eq_uv(or_uv(bitss[0], bitss[2]), freeze([0, 1, 1]));
+    assert_eq_uv(not_uv(bitss[0]), freeze([1, 1, 0]));
+}

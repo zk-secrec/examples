@@ -1,0 +1,31 @@
+use Std::*;
+use Integer::*;
+use Inequalities::*;
+use String::*;
+
+type N : Nat = 2305843009213693951;
+
+fn main() where Field[N], Vectorization {
+  let maxlen = get_public("maxlen");
+  let x_pre : list[uint[N] $pre @verifier] $pre @verifier = get_instance("x");
+  let x : list[uint[N] $post @verifier] = for i in 0..maxlen { wire{x_pre[i as @verifier]} };
+  let xlen = wire { get_instance("xlen") };
+  let xstr : String[$post, @verifier, N] = String { chars : x, len : xlen };
+  let y_pre : list[uint[N] $pre @prover] $pre @prover = get_witness("y");
+  let y : list[uint[N] $post @prover] = for i in 0..maxlen { wire{y_pre[i as @prover]} };
+  let ylen = wire { get_witness("ylen") };
+  let ystr : String[$post, @prover, N] = String { chars : y, len : ylen };
+  let z_pre : list[uint[N] $pre @prover] $pre @prover = get_witness("z");
+  let z : list[uint[N] $post @prover] = for i in 0..maxlen { wire{z_pre[i as @prover]} };
+  let zlen = wire { get_witness("zlen") };
+  let zstr : String[$post, @prover, N] = String { chars : z, len : zlen };
+  let mut sizeasserter_prover : SizeAsserter[N, $post, @prover] = sizeasserter_new(log2(N) as u64 - 2);
+  let mut sizeasserter_verifier : SizeAsserter[N, $post, @verifier] = sizeasserter_new(log2(N) as u64 - 2);
+  let xstrbgn = string_substring3(xstr, 0, 3, 20, ref sizeasserter_verifier);
+  let xstrend = string_substring3(xstr, 8, 3, 20, ref sizeasserter_verifier);
+  let zstrbgn = string_substring3(zstr, 0, 3, maxlen, ref sizeasserter_prover);
+  string_assert_eq(string_to_prover(xstrbgn), ystr, maxlen);
+  dbg_assert(string_eq(string_to_prover(string_to_pre(xstrbgn)), string_to_pre(ystr), maxlen));
+  string_assert_eq(string_to_prover(xstrbgn), zstrbgn, maxlen);
+  string_assert_eq(xstrbgn, xstrend, maxlen);
+}

@@ -1,0 +1,279 @@
+use Std::*;
+use Integer::*;
+use Inequalities::*;
+use Date::*;
+use String::*;
+use IsFromFirst::*;
+use hashes::*;
+use utils::*;
+use cbor::*;
+
+type N61 : Nat = 0x1FFFFFFFFFFFFFFF;
+type u61 : Unqualified = uint[N61];
+type b61 : Unqualified = bool[N61];
+
+struct Person[$S, @D]
+{ family_name: String[$S, @public, N61]
+, given_name: String[$S, @public, N61]
+, birth_date: Date[$S, @public, N61]
+, revealed_diagnoses: list[String[$S, @D, N61]]
+}
+
+struct Restrictions[$S, @D]
+{ bad_diagnoses: list[String[$S, @D, N61]]
+, good_provider_npis: list[String[$S, @D, N61]]
+, maxlen_diagnosis : u64 $pre @public
+, maxlen_npi : u64 $pre @public
+}
+
+struct MDL[$S, @D]
+{ family_name: String[$S, @D, N61]
+, given_name: String[$S, @D, N61]
+, birth_date: Date[$S, @D, N61]
+, issue_date: Date[$S, @D, N61]
+, expiry_date: Date[$S, @D, N61]
+, issuing_authority: String[$S, @D, N61]
+, diagnoses: list[String[$S, @D, N61]]
+}
+
+struct MSO[$S, @D]
+{ signed: Date[$S, @D, N61]
+, valid_from: Date[$S, @D, N61]
+, valid_until: Date[$S, @D, N61]
+, value_digests: list[list[u61 $S @D]]
+}
+
+fn extract_mDLs(input : list[list[list[u61 $post @prover]]], person : Person[$post, @verifier], nums_diagnoses : list[u64 $pre @public], maxlen_npi : u64 $pre @public, maxlen_diagnosis : u64 $pre @public, digest_ids : list[u61 $post @public], ref large_sizeasserter : SizeAsserter[N61, $post, @prover], ref small_sizeasserter : SizeAsserter[N61, $post, @prover], ref medium_sizeasserter : SizeAsserter[N61, $post, @prover]) -> list[MDL[$post, @prover]]
+where Field[N61], Challenge[N61]
+{ let digest_id_key = [100, 105, 103, 101, 115, 116, 73, 68]
+; let element_id_key = [101, 108, 101, 109, 101, 110, 116, 73, 100, 101, 110, 116, 105, 102, 105, 101, 114]
+; let element_val_key = [101, 108, 101, 109, 101, 110, 116, 86, 97, 108, 117, 101]
+; let family_name_key = [102,97,109,105,108,121,95,110,97,109,101]
+; let given_name_key = [103,105,118,101,110,95,110,97,109,101]
+; let birth_date_key = [98,105,114,116,104,95,100,97,116,101]
+; let issue_date_key = [105,115,115,117,101,95,100,97,116,101]
+; let expiry_date_key = [101,120,112,105,114,121,95,100,97,116,101]
+; let issuing_authority_key = [105,115,115,117,105,110,103,95,97,117,116,104,111,114,105,116,121]
+; let diagnoses_key = [100,105,97,103,110,111,115,101,115]
+; let item_keyvals = [family_name_key, given_name_key, birth_date_key, issue_date_key, expiry_date_key, issuing_authority_key, diagnoses_key]
+; let max_strlens = 
+  [ max_pre(17, person.family_name.len as $pre as u64)
+  , max_pre(17, person.given_name.len as $pre as u64)
+  , 17
+  , 17
+  , 17
+  , max_pre(17, maxlen_npi)
+  , max_pre(17, maxlen_diagnosis)
+  ]
+; let max_deps = [2, 2, 3, 3, 3, 2, 3]
+; for i in 0 .. length(input)
+  { let val_lens = [1, 1, 2, 2, 2, 1, 1 + nums_diagnoses[i]]
+  ; let max_sublens = [4, 4, 4, 4, 4, 4, max_pre(4, nums_diagnoses[i])]
+  ; let mut cbors = for k in 0 .. length(digest_ids)
+    { let config = CborConfig
+      { total_len: length(input[i][k])
+      , val_len: 8 + val_lens[k]
+      , max_strlen: max_strlens[k]
+      , max_sublen: max_sublens[k]
+      , max_dep: max_deps[k]
+      }
+    ; let arrays = cbor_init_arrays(config)
+    ; let stores = cbor_init_stores()
+    ; Cbor { config: config, arrays: arrays, stores: stores }
+    }
+  ; for k in 0 .. length(digest_ids) 
+    { cbor_init(input[i][k], ref cbors[k], ref large_sizeasserter, ref small_sizeasserter, ref medium_sizeasserter) 
+    ; let digest_id_ptr = cbor_lookup_map_strkey_with_check(ref cbors[k], 0, digest_id_key)
+    ; let element_id_ptr = cbor_lookup_map_strkey(ref cbors[k], 0, element_id_key)
+    ; let digest_id_val = cbor_get_val(ref cbors[k], digest_id_ptr)
+    ; let element_id_val = cbor_get_str(ref cbors[k], element_id_ptr)
+    ; assert_zero(digest_id_val - digest_ids[k] as @prover)
+    ; string_assert_eq(element_id_val, string_with_native_len(item_keyvals[k]), length(item_keyvals[k]))
+    }
+  ; let element_val_ptrs = for k in 0 .. length(digest_ids) { cbor_lookup_map_strkey_with_check(ref cbors[k], 0, element_val_key) }
+  ; assert_zero(cbor_get_val(ref cbors[6], element_val_ptrs[6]) - (wire { nums_diagnoses[i] as u61 }) as @prover)
+  ; assert_zero(cbor_get_typ(ref cbors[6], element_val_ptrs[6]) - 4)
+  ; let family_name_val = cbor_get_str_with_check(ref cbors[0], element_val_ptrs[0])
+  ; let given_name_val = cbor_get_str_with_check(ref cbors[1], element_val_ptrs[1])
+  ; let birth_date_val = cbor_get_date_with_check(ref cbors[2], element_val_ptrs[2])
+  ; let issue_date_val = cbor_get_date_with_check(ref cbors[3], element_val_ptrs[3])
+  ; let expiry_date_val = cbor_get_date_with_check(ref cbors[4], element_val_ptrs[4])
+  ; let issuing_authority_val = cbor_get_str_with_check(ref cbors[5], element_val_ptrs[5])
+  ; let diagnoses_val = for j in 0 .. nums_diagnoses[i]
+    { let idx_ptr = cbor_lookup_array(ref cbors[6], element_val_ptrs[6], (wire { j as u61 }) as @prover)
+    ; cbor_get_str_with_check(ref cbors[6], idx_ptr)
+    }
+  ; MDL
+    { family_name: family_name_val
+    , given_name: given_name_val
+    , birth_date: birth_date_val
+    , issue_date: issue_date_val
+    , expiry_date: expiry_date_val
+    , issuing_authority: issuing_authority_val
+    , diagnoses: diagnoses_val
+    }
+  }
+}
+
+fn extract_msos(input : list[list[u61 $post @prover]], digest_ids : list[u61 $post @public], num_mso_fields : u64 $pre @public, len_hash: u64 $pre @public, ref large_sizeasserter : SizeAsserter[N61, $post, @prover], ref small_sizeasserter : SizeAsserter[N61, $post, @prover], ref medium_sizeasserter : SizeAsserter[N61, $post, @prover]) -> list[MSO[$post, @prover]]
+where Field[N61], Challenge[N61]
+{ let num_validity_info_fields = 3
+; let value_digests_key = [118, 97, 108, 117, 101, 68, 105, 103, 101, 115, 116, 115]
+; let name_spaces_key = [110,97,109,101,83,112,97,99,101,115]
+; let org_iso_18013_key = [111,114,103,46,105,115,111,46,49,56,48,49,51,46,53,46,49]
+; let validity_info_key = [118, 97, 108, 105, 100, 105, 116, 121, 73, 110, 102, 111]
+; let signed_key = [115,105,103,110,101,100]
+; let valid_from_key = [118,97,108,105,100,70,114,111,109]
+; let valid_until_key = [118,97,108,105,100,85,110,116,105,108]
+; for i in 0 .. length(input)
+  { let config = CborConfig
+    { total_len: length(input[i])
+    , val_len: 1 + 2 * num_mso_fields + 2 + 2 + 2 * length(digest_ids) + 3 * num_validity_info_fields
+    , max_strlen: 32
+    , max_sublen: max_pre(length(digest_ids), max_pre(num_validity_info_fields, num_mso_fields))
+    , max_dep: 5
+    }
+  ; let arrays = cbor_init_arrays(config)
+  ; let stores = cbor_init_stores()
+  ; let mut cbor = Cbor { config: config, arrays: arrays, stores: stores }
+  ; cbor_init(input[i], ref cbor, ref large_sizeasserter, ref small_sizeasserter, ref medium_sizeasserter)
+  ; let validity_info_ptr = cbor_lookup_map_strkey_with_check(ref cbor, 0, validity_info_key)
+  ; let signed_ptr = cbor_lookup_map_strkey_with_check(ref cbor, validity_info_ptr, signed_key)
+  ; let valid_from_ptr = cbor_lookup_map_strkey(ref cbor, validity_info_ptr, valid_from_key)
+  ; let valid_until_ptr = cbor_lookup_map_strkey(ref cbor, validity_info_ptr, valid_until_key)
+  ; let value_digests_ptr = cbor_lookup_map_strkey(ref cbor, 0, value_digests_key)
+  ; let name_spaces_ptr = cbor_lookup_map_strkey_with_check(ref cbor, value_digests_ptr, name_spaces_key)
+  ; let org_iso_18013_ptr = cbor_lookup_map_strkey_with_check(ref cbor, name_spaces_ptr, org_iso_18013_key)
+  ; let signed_val = cbor_get_date_with_check(ref cbor, signed_ptr)
+  ; let valid_from_val = cbor_get_date_with_check(ref cbor, valid_from_ptr)
+  ; let valid_until_val = cbor_get_date_with_check(ref cbor, valid_until_ptr)
+  ; assert_zero(cbor_get_typ(ref cbor, org_iso_18013_ptr) - 5)
+  ; let value_digests_val = for k in 0 .. length(digest_ids)
+    { let digest_ptr = cbor_lookup_map_intkey(ref cbor, org_iso_18013_ptr, digest_ids[k] as @prover)
+    ; cbor_get_bytes_with_check(ref cbor, digest_ptr, len_hash)
+    }
+  ; MSO
+    { signed: signed_val
+    , valid_from: valid_from_val
+    , valid_until: valid_until_val
+    , value_digests: value_digests_val
+    }
+  }
+}
+
+fn check_names_dates(person : Person[$post, @verifier], mDLs : list[MDL[$post, @prover]], mobile_security_objects : list[MSO[$post, @prover]], today : Date[$post, @public, N61], ref sizeasserter : SizeAsserter[N61, $post, @prover])
+where Field[N61]
+{ let today_post = date_to_prover(today)
+; for i in 0 .. length(mDLs)
+  { string_assert_eq(string_to_prover(person.family_name), mDLs[i].family_name, person.family_name.len as $pre as u64)
+  ; string_assert_eq(string_to_prover(person.given_name), mDLs[i].given_name, person.given_name.len as $pre as u64)
+  ; date_assert_eq(date_to_prover(person.birth_date), mDLs[i].birth_date)
+  ; date_assert_le(mDLs[i].issue_date, mobile_security_objects[i].valid_from, ref sizeasserter)
+  ; date_assert_le(mobile_security_objects[i].valid_from, today_post, ref sizeasserter)
+  ; date_assert_le(today_post, mobile_security_objects[i].valid_until, ref sizeasserter)
+  ; date_assert_le(mobile_security_objects[i].valid_until, mDLs[i].expiry_date, ref sizeasserter)
+  }
+; 
+}
+
+unchecked eff * -> * -> [*] -> * -> * -> * ! @public
+fn check_business_logic(person : Person[$post, @verifier], restrictions : Restrictions[$post, @verifier], mDLs : list[MDL[$post, @prover]], maxlen_diagnosis : u64 $pre @public, ref sizeasserter : SizeAsserter[N61, $post, @prover])
+where Field[N61], Challenge[N61]
+{ let issuing_authorities = for i in 0 .. length(mDLs) { mDLs[i].issuing_authority }
+; let diagnoses = concat_non_rectangle(for i in 0 .. length(mDLs) { mDLs[i].diagnoses })
+; let bad_diagnosis_vals = for i in 0 .. length(restrictions.bad_diagnoses) { eval_string(restrictions.bad_diagnoses[i], 256) }
+; let revealed_diagnosis_vals = for i in 0 .. length(person.revealed_diagnoses) { eval_string(person.revealed_diagnoses[i], 256) }
+; let diagnosis_vals = for i in 0 .. length(diagnoses) { eval_string(diagnoses[i], 256) }
+; let bad_diagnosis_lens = for i in 0 .. length(restrictions.bad_diagnoses) { restrictions.bad_diagnoses[i].len }
+; let diagnosis_lens = for i in 0 .. length(diagnoses) { diagnoses[i].len }
+; let is_bad_diagnosis : list[b61 $post @prover] = is_prefixed_from_first(bad_diagnosis_vals, diagnosis_vals, bad_diagnosis_lens, diagnosis_lens, maxlen_diagnosis, ref sizeasserter)
+; let is_revealed_diagnosis : list[b61 $post @prover] = is_from_first(revealed_diagnosis_vals, diagnosis_vals, ref sizeasserter)
+; let is_valid_provider = string_is_from_first(restrictions.good_provider_npis, issuing_authorities, ref sizeasserter)
+; let provider_validities : list[b61 $post @prover] = concat_non_rectangle(for i in 0 .. length(mDLs) { [is_valid_provider[length(restrictions.good_provider_npis) + i]; length(mDLs[i].diagnoses)] })
+; assert_true_cnt(is_revealed_diagnosis, length(person.revealed_diagnoses) * 2)
+; for i in 0 .. length(diagnoses)
+  { let is_revealed = is_revealed_diagnosis[length(person.revealed_diagnoses) + i]
+  ; let is_bad = is_bad_diagnosis[length(restrictions.bad_diagnoses) + i]
+  ; let is_valid = provider_validities[i]
+  /*
+  ; dbg_print("i=" ++ to_string(i))
+  ; dbg_print("is_valid=" ++ (to_string(is_valid as $pre) ++ (" is_revealed=" ++ (to_string(is_revealed as $pre) ++ (" is_bad=" ++ to_string(is_bad as $pre))))))
+  */
+  ; assert(is_valid)
+  ; assert(is_revealed | !is_bad)
+  }
+;
+}
+
+fn main()
+where Field[N61], Challenge[N61]
+{ // public constants
+  let fbw = log2(N61) as u64 - 2
+; let len_hash = 32
+; let digest_ids = [1, 2, 3, 4, 5, 7, 34]
+; let today_pre : list[u61 $pre @public] = get_public("today")
+; let family_name_pre : list[u61 $pre @public] = get_public("family_name")
+; let given_name_pre : list[u61 $pre @public] = get_public("given_name")
+; let dob_pre : list[u61 $pre @public] = get_public("dob")
+; let num_bad_diagnoses : u64 $pre @public = get_public("num_bad_diagnoses")
+; let num_revealed_diagnoses : u64 $pre @public = get_public("num_revealed_diagnoses")
+; let num_good_providers : u64 $pre @public = get_public("num_good_providers")
+; let num_hrs : u64 $pre @public = get_public("num_hrs")
+; let maxlen_diagnosis : u64 $pre @public = 7
+; let maxlen_npi : u64 $pre @public = get_public("maxlen_npi")
+; let lenss_hr_fields : list[list[u64 $pre @public]] = get_public("lenss_hr_fields")
+; let nums_diagnoses : list[u64 $pre @public] = get_public("nums_diagnoses")
+; let num_hr_fields : u64 $pre @public = get_public("num_hr_fields")
+; let num_mso_fields : u64 $pre @public = get_public("num_mso_fields")
+; let num_isi_fields : u64 $pre @public = get_public("num_isi_fields")
+; let lens_msos : list[u64 $pre @public] = get_public("lens_msos")
+; 
+  // instance variables
+  let bad_diagnoses_pre : list[list[u61 $pre @verifier] $pre @verifier] $pre @verifier = get_instance("bad_diagnoses")
+; let revealed_diagnoses_pre : list[list[u61 $pre @verifier] $pre @verifier] $pre @verifier = get_instance("revealed_diagnoses")
+; let good_provider_npis_pre : list[list[u61 $pre @verifier] $pre @verifier] $pre @verifier = get_instance("good_provider_npis") 
+; let mso_hashes_pre : list[list[u61 $pre @verifier] $pre @verifier] $pre @verifier = get_instance("mso_hashes")
+; 
+  // witness variables
+  let hrs_pre : list[list[list[u61 $pre @prover] $pre @prover] $pre @prover] $pre @prover = get_witness("hrs")
+; let msos_pre : list[list[u61 $pre @prover] $pre @prover] $pre @prover = get_witness("msos")
+; 
+  // circuit input
+  let today : Date[$post, @public, N61] = parse_full_date(string_with_native_len(uint_list_to_post(today_pre)))
+; let family_name : String[$post, @public, N61] = string_with_native_len(uint_list_to_post(family_name_pre))
+; let given_name : String[$post, @public, N61] = string_with_native_len(uint_list_to_post(given_name_pre))
+; let dob : Date[$post, @public, N61] = parse_full_date(string_with_native_len(uint_list_to_post(dob_pre)))
+; let bad_diagnoses : list[String[$post, @verifier, N61]] = for i in 0 .. num_bad_diagnoses { uint_list_to_post_string_upto(bad_diagnoses_pre[i as @verifier], maxlen_diagnosis) }
+; let revealed_diagnoses : list[String[$post, @verifier, N61]] = for i in 0 .. num_revealed_diagnoses { uint_list_to_post_string_upto(revealed_diagnoses_pre[i as @verifier], maxlen_diagnosis) }
+; let good_provider_npis : list[String[$post, @verifier, N61]] = for i in 0 .. num_good_providers { uint_list_to_post_string_upto(good_provider_npis_pre[i as @verifier], maxlen_npi) }
+; let mso_hashes : list[list[u61 $post @verifier]] = for i in 0 .. num_hrs { for j in 0 .. len_hash { wire { mso_hashes_pre[i as @verifier][j as @verifier] } } }
+; let hrs : list[list[list[u61 $post @prover]]] = for i in 0 .. num_hrs { for j in 0 .. num_hr_fields { for k in 0 .. lenss_hr_fields[i][j] { wire { hrs_pre[i as @prover][j as @prover][k as @prover] } } } }
+; let msos : list[list[u61 $post @prover]] = for i in 0 .. num_hrs { for j in 0 .. lens_msos[i] { wire { msos_pre[i as @prover][j as @prover] } } }
+; 
+  // structures
+  let total_diagnoses = sum(nums_diagnoses)
+; let mDL_max_val_len = 9 + foldl(fn (acc, el) { max_pre(acc, el) }, 0, nums_diagnoses)
+; let mso_max_val_len = 14 + 2 * num_mso_fields + 2 * length(digest_ids)
+; let mut large_sizeasserter = sizeasserter_new(fbw)
+; let mut small_sizeasserter = sizeasserter_new(5)
+; let mut medium_sizeasserter = sizeasserter_new(log2(max_pre(mDL_max_val_len, mso_max_val_len) as uint) as u64 + 1)
+
+; let person = Person { family_name: family_name, given_name: given_name, birth_date: dob, revealed_diagnoses: revealed_diagnoses }
+; let restrictions = Restrictions { bad_diagnoses: bad_diagnoses, good_provider_npis: good_provider_npis, maxlen_diagnosis: maxlen_diagnosis, maxlen_npi: maxlen_npi }
+; let mDLs = extract_mDLs(hrs, person, nums_diagnoses, maxlen_npi, maxlen_diagnosis, digest_ids, ref large_sizeasserter, ref small_sizeasserter, ref medium_sizeasserter)
+; let mobile_security_objects = extract_msos(msos, digest_ids, num_mso_fields, len_hash, ref large_sizeasserter, ref small_sizeasserter, ref medium_sizeasserter)
+; let mut date_sizeasserter = date_sizeasserter_new()
+;
+
+  // checks
+  check_names_dates(person, mDLs, mobile_security_objects, today, ref date_sizeasserter)
+; check_business_logic(person, restrictions, mDLs, maxlen_diagnosis, ref large_sizeasserter)
+; for i in 0 .. num_hrs 
+  { check_hash(msos[i], mso_hashes[i]) 
+  ; for j in 0 .. length(digest_ids) 
+    { check_hash(hrs[i][j], mobile_security_objects[i].value_digests[j])
+    } 
+  ;
+  }
+; 
+}

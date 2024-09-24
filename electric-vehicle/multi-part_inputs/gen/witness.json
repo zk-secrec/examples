@@ -1,0 +1,22 @@
+{
+    "coordinates": [
+        [
+            "1295563",
+            "436300"
+        ],
+        [
+            "1295380",
+            "435743"
+        ],
+        [
+            "1295265",
+            "435669"
+        ]
+    ],
+    "current_total_distance_coef": "298424",
+    "current_circles_distance_coef": "298424",
+    "last_point": [
+        "1295617",
+        "436654"
+    ]
+}

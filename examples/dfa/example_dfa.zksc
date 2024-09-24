@@ -1,0 +1,21 @@
+use Std::*;
+use DFA::*;
+
+type N : Nat = 0x1fffffffffffffff;
+
+fn main() where Field[N] {
+  let numStates = get_public("numStates");
+  let alphabetSize = get_public("alphabetSize");
+  let trans_pre : list[list[uint[N] $pre @verifier] $pre @verifier] $pre @verifier = get_instance("trans");
+  let init_pre : uint[N] $pre @verifier = get_instance("init");
+  let finals_pre : list[uint[N] $pre @verifier] $pre @verifier = get_instance("finals");
+  let wlen = get_public("wlen");
+  let w_pre : list[uint[N] $pre @verifier] $pre @verifier = get_instance("w");
+  let trans = for i in 0 .. numStates { for j in 0 .. alphabetSize { wire { trans_pre[i as @verifier][j as @verifier] } } };
+  let init = wire { init_pre };
+  let finals = for i in 0 .. numStates { wire { finals_pre[i as @verifier] } };
+  let w = for k in 0 .. wlen { wire { w_pre[k as @verifier] } };
+  let dfa = init_dfa(numStates, alphabetSize, trans, init, finals);
+//  assert(runDFA(dfa, w));
+   assert(runDFA(dfa_to_prover(dfa), uint_list_to_prover(w)));
+}

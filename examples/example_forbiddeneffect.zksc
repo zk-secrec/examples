@@ -1,0 +1,8 @@
+type N : Nat = 101;
+
+fn main() where Field[N] {
+    let mut x : uint[N] @verifier = wire { 1 };
+    let b : bool[N] @verifier = wire { true };
+    if (b as $pre) { x = x + 1; }
+    assert(b);
+}

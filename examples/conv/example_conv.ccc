@@ -1,0 +1,7 @@
+version 2.0.0;
+configuration;
+
+@type field(is_mersenne);
+
+@convert(@out: 0, @in: 0);
+

@@ -1,0 +1,409 @@
+// Based on dlib's code, mostly shape_predictor.h, interpolation.h, point_transforms.h, and their dependencies. There's a dat-file . https://github.com/davisking/dlib/blob/master/dlib/image_processing/shape_predictor.h  https://github.com/davisking/dlib/blob/master/dlib/image_transforms/interpolation.h  https://github.com/davisking/dlib/blob/master/dlib/geometry/point_transforms.h  https://github.com/davisking/dlib/blob/master/examples/dnn_face_recognition_ex.cpp  http://dlib.net/files/shape_predictor_5_face_landmarks.dat.bz2
+
+use Vec::*;
+use FastFixedPointVec::*;
+use SimilarityTransform::*;
+use FastFixedPoint::*;
+use Bitextract::*;
+use OldInequalities::*;
+use Integer::*;
+use Std::*;
+use StoreVec::*;
+
+type N : Nat = 170141183460469231731687303715884105727; // 2^127-1
+
+type Num : Unqualified = Fixed[N, $post, @prover];
+
+type Coef : Qualified = uint[N] $post @prover; // signed fixed-point number with last fixed_pplen() bits after the point
+type Int : Qualified = uint[N] $post @prover; // signed or unsigned integer
+
+fn fixed_len() -> u64 $pre @public {
+    57
+}
+
+fn fixed_pplen() -> u64 $pre @public {
+    35
+}
+
+fn fixed'(x : Coef) -> Num {
+    Fixed {
+        coef : x,
+        len : fixed_len(),
+        pplen : fixed_pplen()
+    }
+}
+
+fn fixed_checked(x : Coef) -> Num where Field[N] {
+    fixed(x, fixed_len(), fixed_pplen())
+}
+
+fn round_down_to_int(x : Coef) -> uint[N] $post @prover where Field[N] {
+    let x' =
+        Fixed {
+            coef : x,
+            len : fixed_len() + fixed_pplen(),
+            pplen : fixed_pplen()
+        };
+    let y = round_down_fixed(x', fixed_len() - fixed_pplen(), 0);
+    y.coef
+}
+
+pub struct FaceAligner {
+    shape_size : u64 $pre @public,
+    num_forests : u64 $pre @public,
+    num_feature_pixels : u64 $pre @public,
+    num_trees_per_forest : u64 $pre @public,
+    num_leaves_per_tree : u64 $pre @public,
+    anchor_idx : list[list[u64 $pre @public]],
+    splits_idx : list[list[list[list[u64 $pre @public]]]],
+    initial_shape : list[Coef],
+    deltas : list[list[arr[Coef]]],
+    leaf_values : list[list[list[list[Coef]]]],
+    splits_thresh : list[list[list[Int]]]
+}
+
+// Initializes a FaceAligner that can be used with apply_face_aligner (several times if necessary).
+pub fn init_face_aligner() -> FaceAligner where Field[N], Vectorization {
+    dbg_print("init_face_aligner: start" : string $pre @public);
+    // Why are some parameters here in public.json and some in instance.json? public.json contains some array indices.
+    // If these were in instance.json then we would need to use @verifier-domain Stores.
+    // We did not want to use them for efficiency reasons.
+    let shape_size : u64 $pre @public = get_public("shape_size"); // 2 * (How many anchor points are we tracking on a face?) (Every anchor point has two coordinates)
+    let num_forests : u64 $pre @public = get_public("num_forests"); // 15 forests, 500 trees per forest, 16 leaves (and 15 intermediate nodes) per forest. This is according to public.json
+    let num_feature_pixels : u64 $pre @public = get_public("num_feature_pixels"); // Number of feature pixels (800) per forest. The nth feature pixel is found by taking the anchor point no. anchor_idx[n] and adding deltas[n] to it. "deltas" will be changing and it will be different for each forest.
+    let num_trees_per_forest : u64 $pre @public = get_public("num_trees_per_forest");
+    let num_leaves_per_tree : u64 $pre @public = get_public("num_leaves_per_tree");
+    let anchor_idx : list[list[u64 $pre @public]] = get_public("anchor_idx"); // 15 rows (1 per forest), 800 elements per row
+    let splits_idx : list[list[list[list[u64 $pre @public]]]] = get_public("splits_idx"); // Which feature pixels need to be compared to each other?
+    let initial_shape_pre : list[uint[N] $pre @verifier] $pre @verifier = get_instance("initial_shape"); // Where are the anchor points on the average face? The vector has coordinates of the points as fixed-point numbers (in the range [0,1])
+    let deltas_pre : list[list[list[uint[N] $pre @verifier] $pre @verifier] $pre @verifier] $pre @verifier = get_instance("deltas"); // These are for the average face
+    let leaf_values_pre : list[list[list[list[uint[N] $pre @verifier] $pre @verifier] $pre @verifier] $pre @verifier] $pre @verifier = get_instance("leaf_values"); // Each leaf has a 10-element vector. This is used to slowly move anchor points. The number of leaves is the total number of leaves in all trees in all forests.
+    let splits_thresh_pre : list[list[list[uint[N] $pre @verifier] $pre @verifier] $pre @verifier] $pre @verifier = get_instance("splits_thresh"); // When comparing feature pixels to each other (see splits_idx), what is the value of the difference between the values of these pixels were the chosen branch changes?
+
+    let initial_shape : list[Coef] =
+        for i in 0 .. shape_size {
+            (wire { initial_shape_pre[i as @verifier] }) as @prover
+        };
+    let deltas : list[list[arr[Coef]]] =
+        for forest_no in 0 .. num_forests {
+            let deltas1_pre = deltas_pre[forest_no as @verifier];
+            for j in 0 .. 2 {
+                array_to_prover(
+                    array_to_post(
+                        freeze(
+                            for i in 0 .. num_feature_pixels {
+                                deltas1_pre[i as @verifier][j as @verifier]
+                            }
+                        )
+                    )
+                )
+            }
+        };
+    let leaf_values : list[list[list[list[Coef]]]] =
+        for forest_no in 0 .. num_forests {
+            let leaf_values1_pre = leaf_values_pre[forest_no as @verifier];
+            for i in 0 .. num_trees_per_forest {
+                for j in 0 .. num_leaves_per_tree {
+                    for k in 0 .. shape_size {
+                        (wire { leaf_values1_pre[i as @verifier][j as @verifier][k as @verifier] }) as @prover
+                    }
+                }
+            }
+        };
+    let num_splits_per_tree = num_leaves_per_tree - 1;
+    let splits_thresh : list[list[list[Int]]] =
+        for forest_no in 0 .. num_forests {
+            let splits_thresh1_pre = splits_thresh_pre[forest_no as @verifier];
+            for i in 0 .. num_trees_per_forest {
+                for j in 0 .. num_splits_per_tree {
+                    (wire { splits_thresh1_pre[i as @verifier][j as @verifier] }) as @prover
+                }
+            }
+        };
+
+    dbg_print("init_face_aligner: end" : string $pre @public);
+    FaceAligner {
+        shape_size : shape_size,
+        num_forests : num_forests,
+        num_feature_pixels : num_feature_pixels,
+        num_trees_per_forest : num_trees_per_forest,
+        num_leaves_per_tree : num_leaves_per_tree,
+        anchor_idx : anchor_idx,
+        splits_idx : splits_idx,
+        initial_shape : initial_shape,
+        deltas : deltas,
+        leaf_values : leaf_values,
+        splits_thresh : splits_thresh
+    }
+}
+
+// image must contain pixels of a monochrome image.
+// It assumes that image[i] is in the range 0..255, it is not checked here.
+// Returns the pixels of the monochrome 150*150 output image in row-major order, each pixel in the range 0..255.
+pub fn apply_face_aligner(fa : FaceAligner, image : list[list[Int]], rect_left : Int, rect_right : Int, rect_top : Int, rect_bottom : Int) -> arr[Int] where Field[N], Vectorization {
+    dbg_print("apply_face_aligner: start" : string $pre @public);
+    let num_rows = length(image);
+    let num_cols = length(image[0]);
+    let shape_size = fa.shape_size;
+    let num_forests = fa.num_forests;
+    let num_feature_pixels = fa.num_feature_pixels;
+    let num_trees_per_forest = fa.num_trees_per_forest;
+    let num_leaves_per_tree = fa.num_leaves_per_tree;
+    let anchor_idx = fa.anchor_idx;
+    let splits_idx = fa.splits_idx;
+    let initial_shape = fa.initial_shape;
+
+    let num_splits_per_tree = num_leaves_per_tree - 1;
+
+    let coef_1 = pow_pre(2, fixed_pplen());
+    let coef_half = pow_pre(2, fixed_pplen() - 1);
+    let num_rows_post = (wire { num_rows as uint[N] }) as @prover;
+    let num_cols_post = (wire { num_cols as uint[N] }) as @prover;
+    let bits_before_point = fixed_len() - fixed_pplen();
+    let bbp_pow2_half = pow_pre(2, bits_before_point - 1);
+    let num_rows_post_minus_1_plus_half = bbp_pow2_half + num_rows_post - 1;
+    let num_cols_post_minus_1_plus_half = bbp_pow2_half + num_cols_post - 1;
+    let num_cols_bits = bitextract(num_cols_post + bbp_pow2_half, bits_before_point);
+    let row_in_bounds_vec = fn (xv) {
+        let yv = add_uint_uv(bbp_pow2_half, xv);
+        let yv_bits = bitextract_uv(yv, bits_before_point);
+        let is_nonnegative = yv_bits[bits_before_point - 1];
+        let zv = add_uint_uv(num_rows_post_minus_1_plus_half, mul_uint_uv(-1, xv));
+        let zv_bits = bitextract_uv(zv, bits_before_point);
+        let is_less_than_num_rows = zv_bits[bits_before_point - 1];
+        let res : arr[Int] = is_nonnegative *. is_less_than_num_rows;
+        res
+    };
+    let col_in_bounds_vec = fn (xv) {
+        let yv = add_uint_uv(bbp_pow2_half, xv);
+        let yv_bits = bitextract_uv(yv, bits_before_point);
+        let is_nonnegative = yv_bits[bits_before_point - 1];
+        let zv = add_uint_uv(num_cols_post_minus_1_plus_half, mul_uint_uv(-1, xv));
+        let zv_bits = bitextract_uv(zv, bits_before_point);
+        let is_less_than_num_cols = zv_bits[bits_before_point - 1];
+        let res : arr[Int] = is_nonnegative *. is_less_than_num_cols;
+        res
+    };
+
+    // check that rect is inside image
+    assert(le(0, rect_left, bits_before_point));
+    assert(le(0, rect_top, bits_before_point));
+    assert(lt(rect_left, rect_right, bits_before_point));
+    assert(lt(rect_top, rect_bottom, bits_before_point));
+    assert(le(rect_right, num_cols_post, bits_before_point));
+    assert(le(rect_bottom, num_rows_post, bits_before_point));
+
+    let rect_height = rect_bottom - rect_top;
+    let rect_width = rect_right - rect_left;
+    let rect_left_coef = rect_left * coef_1;
+    let rect_top_coef = rect_top * coef_1;
+    let rect_left_plus_half_fixed = fixed'(rect_left_coef + coef_half);
+    let rect_top_plus_half_fixed = fixed'(rect_top_coef + coef_half);
+
+    let initial_shape_fixed : list[Num] = for i in 0 .. length(initial_shape) { fixed_checked(initial_shape[i]) };
+    let mut current_shape = initial_shape;
+
+    let mut image_st : Store[N, $post, @prover] = store_new(true, true, true);
+    for i in 0 .. num_rows {
+        dbg_assert(length(image[i]) == num_cols);
+        for j in 0 .. num_cols {
+            let k = (i * num_cols + j) as uint[N];
+            store_write(ref image_st, (wire{k}) as @prover, image[i][j]);
+        }
+        {}
+    }
+
+    for forest_no in 0 .. num_forests {
+        dbg_print("forest" : string $pre @public);
+        dbg_print(to_string(forest_no));
+        let anchor_i = anchor_idx[forest_no];
+        let deltas = fa.deltas[forest_no];
+        let leaf_values = fa.leaf_values[forest_no];
+        let splits_i = splits_idx[forest_no];
+        let splits_thresh = fa.splits_thresh[forest_no];
+        let current_shape_fixed : list[Num] = for i in 0 .. length(current_shape) { fixed_checked(current_shape[i]) };
+        let similarity_tform = find_similarity_transform(initial_shape_fixed, current_shape_fixed);
+        let m00 = similarity_tform.0.0;
+        let m01 = similarity_tform.0.1;
+        let m10 = similarity_tform.0.2;
+        let m11 = similarity_tform.0.3;
+        dbg_print("extracting feature pixels" : string $pre @public);
+        // From here we get the "colors" (i.e. intensities) of 800 pixels. "delta" is multiplied by the similarity transform matrix and the result is transformed to the rectangle that contains the face
+        let i0 =
+            for i in 0 .. num_feature_pixels {
+                2*anchor_i[i]
+            };
+        let s0 =
+            for i in 0 .. num_feature_pixels {
+                current_shape[i0[i]]
+            };
+        let s1 =
+            for i in 0 .. num_feature_pixels {
+                current_shape[i0[i]+1]
+            };
+        let s0 = fv_unchecked(freeze(s0), fixed_len(), fixed_pplen());
+        let s1 = fv_unchecked(freeze(s1), fixed_len(), fixed_pplen());
+        // delta
+        let d0 = fv_unchecked(deltas[0], fixed_len(), fixed_pplen());
+        let d1 = fv_unchecked(deltas[1], fixed_len(), fixed_pplen());
+        // tform * delta
+        let td0 = round_down_fv_to_half(add_fv_unchecked(mul_fixed_fv_exact(m00, d0), mul_fixed_fv_exact(m01, d1)));
+        let td1 = round_down_fv_to_half(add_fv_unchecked(mul_fixed_fv_exact(m10, d0), mul_fixed_fv_exact(m11, d1)));
+        //
+        let q0 = add_fv_unchecked(td0, s0);
+        let q1 = add_fv_unchecked(td1, s1);
+        let p0 = add_fixed_fv_unchecked(rect_left_plus_half_fixed, mul_uint_fv_unchecked(rect_width, q0));
+        let p1 = add_fixed_fv_unchecked(rect_top_plus_half_fixed, mul_uint_fv_unchecked(rect_height, q1));
+        let p0 = round_down_fv_to_int(p0);
+        let p1 = round_down_fv_to_int(p1);
+        let p1_0 = mul_uint_uv(num_cols_post, p1);
+        let p : arr[Int] = p0 +. p1_0;
+        // Check whether the coordinates are inside image.
+        // Reading out of bounds from the store may make it non-continuous, causing the finalization to fail,
+        // thus replace out-of-bounds coordinates by (0,0).
+        // The read value is multiplied by 0 if the coordinates were out of bounds.
+        let col_in_bounds = col_in_bounds_vec(p0);
+        let row_in_bounds = row_in_bounds_vec(p1);
+        let coords_in_bounds : arr[Int] = col_in_bounds *. row_in_bounds;
+        let feature_pixel_values : arr[Int] = coords_in_bounds *. store_read_vec(ref image_st, coords_in_bounds *. p);
+        let feature_pixel_values = thaw(feature_pixel_values);
+        dbg_print("regression trees" : string $pre @public);
+        let split_diffs : list[list[Int]] =
+            for i in 0 .. num_trees_per_forest {
+                for j in 0 .. num_splits_per_tree {
+                    feature_pixel_values[splits_i[i][j][0]] - feature_pixel_values[splits_i[i][j][1]] - splits_thresh[i][j] + 511
+                    // we need to check whether the value without +511 is > 0, i.e. >= 1
+                    // we add 511, so that we can check whether the sum is >= 512, i.e. the highest bit of a 10-bit bitextract is set
+                }
+            };
+        for i in 0 .. num_trees_per_forest {
+            let mut split_is_active : list[Int] = [1];
+            let mut curr_diff : Int = 0;
+            let mut layer_start = 0;
+            let mut layer_end = 0;
+            for j in 0 .. num_splits_per_tree {
+                curr_diff = curr_diff + split_is_active[j] * split_diffs[i][j];  // split_is_active is true for only one node (split) in each layer
+                if (j == layer_end) {  // A tree has 16 leaves, 15 splits, and 4 layers (the layers have 1, 2, 4, and 8 splits).
+                    let bits = bitextract(curr_diff, 10);
+                    let go_left = bits[9] as uint[N];
+                    let go_right = 1 - go_left;
+                    for k in layer_start .. layer_end + 1 {
+                        let is_active = split_is_active[k];
+                        list_push(ref split_is_active, go_left * is_active);
+                        list_push(ref split_is_active, go_right * is_active);
+                    }
+                    layer_start = j + 1;
+                    layer_end = j * 2 + 2;
+                    curr_diff = 0;
+                }
+            }
+            let mut output_leaf_value : list[Coef] = [0; shape_size];
+            for j in 0 .. num_leaves_per_tree {
+                let is_active = split_is_active[num_splits_per_tree + j];  // is_active is true for only one leaf
+                for k in 0 .. shape_size {
+                    output_leaf_value[k] = output_leaf_value[k] + is_active * leaf_values[i][j][k];
+                }
+                {}
+            }
+            for k in 0 .. shape_size {
+                current_shape[k] = current_shape[k] + output_leaf_value[k];
+            }
+            {}
+        };
+        {}
+    }
+
+    let num_parts = shape_size / 2;
+    let shape_parts : list[tuple[Coef, Coef]] =
+        for k in 0 .. num_parts {
+            let q0 = current_shape[2*k];
+            let q1 = current_shape[2*k+1];
+            let p0 = q0 * rect_width + rect_left_coef;
+            let p1 = q1 * rect_height + rect_top_coef;
+            // Not sure if this rounding to integer is necessary. But dlib does it.
+            let p0 = coef_1 * round_down_to_int(p0 + coef_half);
+            let p1 = coef_1 * round_down_to_int(p1 + coef_half);
+            (p0, p1)
+        };
+    let final_transformed_shape =
+        for k in 0 .. shape_size {
+            if (k % 2 == 0) {
+                shape_parts[k / 2].0
+            } else {
+                shape_parts[k / 2].1
+            }
+        };
+    let output_shape : list[Coef] = [3812444864512, 1592567529472, 3078840385536, 1645719584768, 1273286230016, 1593355403264, 2006900932608, 1646052245504, 2543006515200, 3016089403392];  // Coordinates are in the range [0,150] because the output is 150*150 pixels. Average face. I don't know if it is related to initial_shape, it is defined separately in dlib. This list is in the source code in dlib. initial_shape was not in the source code (it came from a binary file, which also contained many other parameters whose contents we have have inside public.json and instance.json)
+    let output_shape_fixed = for i in 0 .. length(output_shape) { fixed_checked(output_shape[i]) };
+    let final_transformed_shape_fixed = for i in 0 .. length(final_transformed_shape) { fixed_checked(final_transformed_shape[i]) };
+    dbg_print("output shape" : string $pre @public);
+    for k in 0 .. shape_size {
+        dbg_print(fixed_to_string(output_shape_fixed[k]));
+    }
+    dbg_print("final transformed shape" : string $pre @public);
+    for k in 0 .. shape_size {
+        dbg_print(fixed_to_string(final_transformed_shape_fixed[k]));
+    }
+    let similarity_tform = find_similarity_transform(output_shape_fixed, final_transformed_shape_fixed);
+    let m00 = similarity_tform.0.0;
+    let m01 = similarity_tform.0.1;
+    let m10 = similarity_tform.0.2;
+    let m11 = similarity_tform.0.3;
+    let b0 = similarity_tform.1.0;
+    let b1 = similarity_tform.1.1;
+
+    let mut r1 : list[Int] = [];
+    let mut c1 : list[Int] = [];
+    let ints : list[Int] = for i in 0 .. 150 { (wire { i as uint[N] }) as @prover };
+    for r in 0 .. 150 : u64 $pre @public {
+        for c in 0 .. 150 : u64 $pre @public {
+            list_push(ref r1, ints[r]);
+            list_push(ref c1, ints[c]);
+        }
+        {}
+    }
+    let r1 = freeze(r1);
+    let c1 = freeze(c1);
+
+    // bilinear interpolation. We take four pixels that are closest to (r1,c1) after applying the similarity transform
+    let c2 = add_fixed_fv_unchecked(b0, add_fv_unchecked(mul_fixed_uv_unchecked(m00, c1), mul_fixed_uv_unchecked(m01, r1)));
+    let r2 = add_fixed_fv_unchecked(b1, add_fv_unchecked(mul_fixed_uv_unchecked(m10, c1), mul_fixed_uv_unchecked(m11, r1)));
+    let left = round_down_fv_to_int(c2);
+    let top = round_down_fv_to_int(r2);
+    let right = add_uint_uv(1, left);
+    let bottom = add_uint_uv(1, top);
+    let lr_frac = sub_fv_unchecked(c2, uv_to_fv_unchecked(left, fixed_len(), fixed_pplen()));
+    let tb_frac = sub_fv_unchecked(r2, uv_to_fv_unchecked(top, fixed_len(), fixed_pplen()));
+    let top_0 = mul_uint_uv(num_cols_post, top);
+    let bottom_0 = mul_uint_uv(num_cols_post, bottom);
+    let top_left : arr[Int] = left +. top_0;
+    let top_right : arr[Int] = right +. top_0;
+    let bottom_left : arr[Int] = left +. bottom_0;
+    let bottom_right : arr[Int] = right +. bottom_0;
+    // Check whether the coordinates are inside image.
+    // Reading out of bounds from the store may make it non-continuous, causing the finalization to fail,
+    // thus replace out-of-bounds coordinates by (0,0).
+    // The read value is multiplied by 0 if the coordinates were out of bounds.
+    let left_in_bounds = col_in_bounds_vec(left);
+    let right_in_bounds = col_in_bounds_vec(right);
+    let top_in_bounds = row_in_bounds_vec(top);
+    let bottom_in_bounds = row_in_bounds_vec(bottom);
+    let top_left_in_bounds : arr[Int] = top_in_bounds *. left_in_bounds;
+    let top_right_in_bounds : arr[Int] = top_in_bounds *. right_in_bounds;
+    let bottom_left_in_bounds : arr[Int] = bottom_in_bounds *. left_in_bounds;
+    let bottom_right_in_bounds : arr[Int] = bottom_in_bounds *. right_in_bounds;
+    let tl : arr[Int] = top_left_in_bounds *. store_read_vec(ref image_st, top_left_in_bounds *. top_left);
+    let tr : arr[Int] = top_right_in_bounds *. store_read_vec(ref image_st, top_right_in_bounds *. top_right);
+    let bl : arr[Int] = bottom_left_in_bounds *. store_read_vec(ref image_st, bottom_left_in_bounds *. bottom_left);
+    let br : arr[Int] = bottom_right_in_bounds *. store_read_vec(ref image_st, bottom_right_in_bounds *. bottom_right);
+    let one = fixed'(coef_1);
+    let half = fixed'(coef_1);
+    let rl_frac = add_fixed_fv_unchecked(one, negate_fv(lr_frac));
+    let bt_frac = add_fixed_fv_unchecked(one, negate_fv(tb_frac));
+    let t1 = add_fv_unchecked(mul_uv_fv_unchecked(tl, rl_frac), mul_uv_fv_unchecked(tr, lr_frac));
+    let t2 = add_fv_unchecked(mul_uv_fv_unchecked(bl, rl_frac), mul_uv_fv_unchecked(br, lr_frac));
+    let t3 = round_down_fv_to_half(add_fv_unchecked(mul_fv_exact(t1, bt_frac), mul_fv_exact(t2, tb_frac)));
+    let xv = round_down_fv_to_int(add_fixed_fv_unchecked(half, t3));
+    dbg_print("apply_face_aligner: end" : string $pre @public);
+    xv
+}

@@ -1,0 +1,11 @@
+use Std::*;
+use Integer::*;
+
+// Auxiliary function that interprets a country code as a natural number written on base 26
+// Empty code is mapped to 26 * 26
+pub fn country_number[N : Nat, $S, @D](country : list[uint[N] $S @D]) -> uint[N] $S @D 
+  where Field[N] {
+  let res = (country[0] - 65) * 26 + (country[1] - 65);
+  uint_cond(is_zero(res + 827), 26 * 26, res)
+}
+

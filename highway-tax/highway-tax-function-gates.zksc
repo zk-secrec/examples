@@ -1,0 +1,344 @@
+use Std::*;
+use Integer::*;
+use FixedPoint::*;
+use Inequalities::*;
+use Coord::*;
+use TriangleFG::*;
+use Poseidon::*;
+use SqrtUtil::*;
+use DistUtilFG::*;
+use FG::*;
+
+type N : Nat = 0x1FFFFFFFFFFFFFFF;
+
+// Read the triangulation of the area off the highway from public.json
+fn read_triangles[N : Nat](len : u64 $pre @public, pplen : u64 $pre @public) -> list[Triangle[N, $post, @public]]
+    where Field[N] {
+    let triangles_pre : list[list[list[uint[N] $pre @public]]] = get_public("triangles");
+    let len_triangles = length(triangles_pre);
+    
+    for i in 0..len_triangles {
+        (
+            (fixed_downcast(uint_to_fixed(triangles_pre[i][0][0], len, pplen)), fixed_downcast(uint_to_fixed(triangles_pre[i][0][1], len, pplen))),
+            (fixed_downcast(uint_to_fixed(triangles_pre[i][1][0], len, pplen)), fixed_downcast(uint_to_fixed(triangles_pre[i][1][1], len, pplen))),
+            (fixed_downcast(uint_to_fixed(triangles_pre[i][2][0], len, pplen)), fixed_downcast(uint_to_fixed(triangles_pre[i][2][1], len, pplen)))
+        )
+    }
+}
+
+// Just a dummy to estimate performance
+// Read and pad the triangles representing are off the highway from public.json
+fn pad_triangles[N : Nat](len : u64 $pre @public, pplen : u64 $pre @public) -> list[Triangle[N, $post, @public]]
+    where Field[N] {
+    let triangles_pre : list[list[list[uint[N] $pre @public]]] = get_public("triangles");
+    let len_triangles = length(triangles_pre);
+
+    for i in 0..1000 {
+        let row = (if i < len_triangles {i} else {len_triangles-1});
+        (
+            (fixed_downcast(uint_to_fixed(triangles_pre[i][0][0], len, pplen)), fixed_downcast(uint_to_fixed(triangles_pre[i][0][1], len, pplen))),
+            (fixed_downcast(uint_to_fixed(triangles_pre[i][1][0], len, pplen)), fixed_downcast(uint_to_fixed(triangles_pre[i][1][1], len, pplen))),
+            (fixed_downcast(uint_to_fixed(triangles_pre[i][2][0], len, pplen)), fixed_downcast(uint_to_fixed(triangles_pre[i][2][1], len, pplen)))
+        )
+    }
+}
+
+// Read and pad the coordinates of the car from witness.json
+fn pad_car_coords[N : Nat](len : u64 $pre @public, pplen : u64 $pre @public, r : u64 $pre @public, ref sizeasserters : list[SizeAsserter[N, $post, @prover]]) -> tuple[list[Coord[N, $post, @prover]], list[uint[N] $post @prover]]
+    where Field[N] {
+    let coords : list[list[uint[N] $pre @prover] $pre @prover] $pre @prover = get_witness("car_coords");
+    let max_coords = get_public("max_car_coords");
+
+    let len_coords = length(coords);
+    let len_hashable_coords = ((max_coords * 2 + 1) / r + 1) * r;  // Round the length of hashable coords up to the nearest multiple of 
+    let mut hashable_coords : list[uint[N] $post @prover] = [0; len_hashable_coords];
+    let mut padded_coords : list[Coord[N, $post, @prover]] = [(fixed_downcast(uint_to_fixed(0, len, pplen)), fixed_downcast(uint_to_fixed(0, len, pplen))); max_coords];
+    for i in 0..max_coords {
+        let row = (if i as @prover < len_coords {i as @prover} else {len_coords-1}) as @prover;
+        let x : uint[N] $post @prover = wire{coords[row][0]};
+        let y : uint[N] $post @prover = wire{coords[row][1]};
+        padded_coords[i] = (uint_to_fixed3(x, len, pplen, ref sizeasserters), uint_to_fixed3(y, len, pplen, ref sizeasserters));
+        hashable_coords[2 * i] = x;
+        hashable_coords[2 * i + 1] = y;
+    };
+    // Add the 10* required by Poseidon to the end of hashable coordinates
+    hashable_coords[2 * max_coords] = wire{1 : uint[N] $pre @prover};
+    for i in (2 * max_coords + 1)..len_hashable_coords {
+        hashable_coords[i] = wire{0 : uint[N] $pre @prover};
+    };
+    (padded_coords, hashable_coords)
+}
+
+fn triangle_list_get[N : Nat](triangles : list[Triangle[N, $post, @public]], index : uint[N] $post @prover) -> Triangle[N, $post, @prover]
+    where Field[N] {
+    // Create a list of (boolean) scalars where exactly one value (at the index position) is 1/true
+    let scalars_pre : list[bool[N] $pre @prover] =
+    for i in 0..length(triangles) {
+        if (i as @prover == index as $pre as u64) {true} else {false}
+    };
+    // Wire the boolean scalars
+    let scalars : list[bool[N] $post @prover] =
+    for i in 0..length(scalars_pre) {
+        wire{scalars_pre[i]}
+    };
+
+    // Assert that the sum of scalars (as integers) is one and they are all either 0 or 1, proving that exactly one of the scalars is 1 and the rest are 0
+    let scalars_uint : list[uint[N] $post @prover] = 
+    for i in 0..length(scalars_pre) {
+        scalars[i] as uint[N]
+    };
+    assert_zero(sum(scalars_uint) - 1);
+
+    // Find the linear combination of list elements that will be equal to the element at index position
+    // NB! We will find a linear combination of coefficients for better performance
+    let mut lin_comb : tuple[
+        uint[N] $post @prover, 
+        uint[N] $post @prover, 
+        uint[N] $post @prover,
+        uint[N] $post @prover,
+        uint[N] $post @prover,
+        uint[N] $post @prover
+    ] 
+    = 
+    (
+        wire{0 : uint[N] @prover}, 
+        wire{0 : uint[N] @prover}, 
+        wire{0 : uint[N] @prover},
+        wire{0 : uint[N] @prover}, 
+        wire{0 : uint[N] @prover}, 
+        wire{0 : uint[N] @prover}
+    );
+
+    for i in 0..length(scalars_uint) {
+        lin_comb.0 = lin_comb.0 + triangles[i].0.0.coef as @prover * scalars_uint[i];
+        lin_comb.1 = lin_comb.1 + triangles[i].0.1.coef as @prover * scalars_uint[i];
+        lin_comb.2 = lin_comb.2 + triangles[i].1.0.coef as @prover * scalars_uint[i];
+        lin_comb.3 = lin_comb.3 + triangles[i].1.1.coef as @prover * scalars_uint[i];
+        lin_comb.4 = lin_comb.4 + triangles[i].2.0.coef as @prover * scalars_uint[i];
+        lin_comb.5 = lin_comb.5 + triangles[i].2.1.coef as @prover * scalars_uint[i];
+    };
+
+    let len : u64 $pre @public = triangles[0].0.0.len;
+    let pplen : u64 $pre @public = triangles[0].0.0.pplen;
+    
+    // Need to convert lin_comb back to a Triangle
+    (
+        (
+            fixed_post_prover(lin_comb.0, len, pplen), 
+            fixed_post_prover(lin_comb.1, len, pplen)
+        ),
+        (
+            fixed_post_prover(lin_comb.2, len, pplen), 
+            fixed_post_prover(lin_comb.3, len, pplen)
+        ),
+        (
+            fixed_post_prover(lin_comb.4, len, pplen), 
+            fixed_post_prover(lin_comb.5, len, pplen)
+        )
+    )
+}
+
+// Find unnormalized barycentric coordinates of a point with respect to a triangle, multiplied by 2 ^ (2 * pplen) in $pre stage
+// Note that we presume the points of the triangle to have integral coordinates
+fn barycentric_coords_undiv_pre[N : Nat, $S, @D](triangle : Triangle[N, $S, @D], point : Coord[N, $S, @D], area_doubled : uint[N] $S @D) -> tuple[uint[N] $pre @D, uint[N] $pre @D]
+    where Field[N] {
+    let triangle_pre = triangle_pre(triangle);
+    let p = coord_pre(point);
+    let p0 = triangle_pre.0;
+    let p1 = triangle_pre.1;
+    let p2 = triangle_pre.2;
+
+    // Note that the vertices of the triangles all have integer coordinates
+    // These will be the $pre versions of the vertices with integer coordinates
+    let p0_up : tuple[uint $pre @D, uint $pre @D] = (p0.0.coef as $pre as uint, p0.1.coef as $pre as uint); 
+    let p1_up : tuple[uint $pre @D, uint $pre @D] = (p1.0.coef as $pre as uint, p1.1.coef as $pre as uint); 
+    let p2_up : tuple[uint $pre @D, uint $pre @D] = (p2.0.coef as $pre as uint, p2.1.coef as $pre as uint);
+    let p_up : tuple[uint $pre @D, uint $pre @D] = (p.0.coef as $pre as uint, p.1.coef as $pre as uint);
+
+    // Check the actual sign of the area
+    let area_plus = p0_up.0 * p1_up.1 + p1_up.0 * p2_up.1 + p2_up.0 * p0_up.1;
+    let area_minus = p0_up.0 * p2_up.1 + p1_up.0 * p0_up.1 + p2_up.0 * p1_up.1;
+    let area_sign : uint $pre @D = if (area_plus < area_minus) {-1} else {1};
+
+    // Find the unnormalized barycentric coordinates of p with respect to the triangle (p0, p1, p2), multiplied by 2 ^ (2 * pplen)
+    let mut s_undiv : uint $pre @D = (p0_up.1 * p2_up.0 - p0_up.0 * p2_up.1 + (p2_up.1 - p0_up.1) * p_up.0 + (p0_up.0 - p2_up.0) * p_up.1) * area_sign;
+    let mut t_undiv : uint $pre @D = (p0_up.0 * p1_up.1 - p0_up.1 * p1_up.0 + (p0_up.1 - p1_up.1) * p_up.0 + (p1_up.0 - p0_up.0) * p_up.1) * area_sign;
+
+    // If s_undiv and t_undiv are the coordinates of a point not inside the triangle, return the barycentric coordinates of p0
+    if (s_undiv < 0 | t_undiv < 0 | s_undiv + t_undiv > area_doubled as $pre as uint) {
+        s_undiv = 0;
+        t_undiv = 0;
+    }
+
+    (s_undiv as uint[N], t_undiv as uint[N])
+}
+
+sieve fn is_in_triangle[N : Nat, @D](triangle : Triangle[N, $post, @D], p : Coord[N, $post, @D]) -> bool[N] $post @D
+    where Field[N] {
+    let p0 = triangle.0;
+    let p1 = triangle.1;
+    let p2 = triangle.2;
+
+    // Find the doubled area of the triangle, multiplied by 2 ^ (2 * pplen) in zero-knowledge
+    let A = triangle_area_doubled(p0, p1, p2);
+    // Find barycentric coordinates of p with respect to the triangle, multiplied by 2 ^ (2 * pplen)
+    let bary_coords_pre : tuple[uint[N] $pre @D, uint[N] $pre @D] = barycentric_coords_undiv_pre(triangle, p, A);
+    let s = wire{bary_coords_pre.0};
+    let t = wire{bary_coords_pre.1};
+
+    // Check that s, t really are the unnormalized barycentric coordinates of some point in the triangle
+    // For this, we need to show that 0 <= s <= A, 0 <= t <= A and s + t <= A
+    // Since s, t are unsigned integers and s + t <= A implies s <= A, t <= A for unsigned integers, then it suffices to check s + t <= A
+    if (@prover <= @D) {
+        let bw = p.0.len * 2 + 2;
+        assert(less_than(s + t, A, bw));
+    }
+
+    // Check if the barycentric coordinates we put on the circuit are indeed the coordinates of p
+    // If yes, then A * p = A * p0 + s * (p1 - p0) + t * (p2 - p0) or equivalently, A * (p0 - p) + s * (p1 - p0) + t * (p2 - p0) = 0
+    let x = A * (p0.0.coef - p.0.coef) + s * (p1.0.coef - p0.0.coef) + t * (p2.0.coef - p0.0.coef);
+    let y = A * (p0.1.coef - p.1.coef) + s * (p1.1.coef - p0.1.coef) + t * (p2.1.coef - p0.1.coef);
+
+    is_zero(x) & is_zero(y)
+}
+
+fn is_in_triangle_pre[N : Nat, @D](triangle : Triangle[N, $pre, @D], p : Coord[N, $pre, @D]) -> bool[N] $pre @D
+    where Field[N] {
+    let p0 = triangle.0;
+    let p1 = triangle.1;
+    let p2 = triangle.2;
+
+    // Find the doubled area of the triangle, multiplied by 2 ^ (2 * pplen) in zero-knowledge
+    let A = triangle_area_doubled_pre(p0, p1, p2);
+    // Find barycentric coordinates of p with respect to the triangle, multiplied by 2 ^ (2 * pplen)
+    let bary_coords_pre : tuple[uint[N] $pre @D, uint[N] $pre @D] = barycentric_coords_undiv_pre(triangle, p, A);
+    let s = bary_coords_pre.0;
+    let t = bary_coords_pre.1;
+
+    // Check if the barycentric coordinates we put on the circuit are indeed the coordinates of p
+    // If yes, then A * p = A * p0 + s * (p1 - p0) + t * (p2 - p0) or equivalently, A * (p0 - p) + s * (p1 - p0) + t * (p2 - p0) = 0
+    let x = A * (p0.0.coef - p.0.coef) + s * (p1.0.coef - p0.0.coef) + t * (p2.0.coef - p0.0.coef);
+    let y = A * (p0.1.coef - p.1.coef) + s * (p1.1.coef - p0.1.coef) + t * (p2.1.coef - p0.1.coef);
+
+    is_zero(x) & is_zero(y)
+}
+
+// Check if the car point was near the road
+sieve fn is_off_road[N : Nat](triangles : list[Triangle[N, $post, @public]], car_point : Coord[N, $post, @prover]) -> bool[N] $post @prover
+    where Field[N] {
+    // Pre
+
+    // This will be the index of the triangle that car point was in
+    // Default value (if the car point was not in any triangles) is 0
+    let mut tri_index : u64 $pre @prover = 0;
+
+    let car_point_pre = coord_pre(car_point);
+
+    // Iterate over the triangles and check if the point was in a triangle
+    for i in 0..length(triangles) {
+        let triangle_p : Triangle[N, $pre, @prover] = triangle_pre(triangle_prover(triangles[i]));
+        let in_tri_pre : bool[N] $pre @prover = is_in_triangle_pre(triangle_p, car_point_pre);
+        if (in_tri_pre) {
+            tri_index = i as @prover;
+        };
+    };
+
+    // Post
+
+    // This triangle will be the first triangle in the list if car_point was *on* the road
+    // It will be the triangle car_point is in if car_point was *off* the road
+    let tri : Triangle[N, $post, @prover] = triangle_list_get(triangles, wire{tri_index as uint[N]});
+    is_in_triangle(tri, car_point)
+}
+
+// Find the distance travelled by the car that's far enough from the highway and the total distance (both as coefficients of the corresponding fixed point numbers)
+fn distance_off_highway[N : Nat](triangles : list[Triangle[N, $post, @public]], car_points : list[Coord[N, $post, @prover]]) -> tuple[uint[N] $post @prover, uint[N] $post @prover]
+    where Field[N] {
+    let len : u64 $pre @public = car_points[0].0.len;
+    let pplen : u64 $pre @public = car_points[0].0.pplen;
+
+    let mut off_distance_coef : uint[N] $post @prover = wire{0};
+    let mut total_distance_coef : uint[N] $post @prover = wire{1};
+    let mut points_off_highway : list[bool[N] $post @prover] = [wire{false}; length(car_points)];
+
+    let p2k : uint[N] $post @public = wire{pow_pre(2 : uint[N] $pre @public, pplen)};
+
+    points_off_highway[0] = is_off_road(triangles, car_points[0]);
+    for i in 1..length(car_points) {
+        let old_car_point = car_points[i - 1];
+        let new_car_point = car_points[i];
+
+        let new_distance_coef = dist_inf(old_car_point, new_car_point, p2k);
+
+        let new_off_road = is_off_road(triangles, new_car_point);
+        points_off_highway[i] = new_off_road;
+        // If the line between the car points was not near the road, add the length of it to the distance traveled off the highway
+        off_distance_coef = uint_cond_sieve(new_off_road & points_off_highway[i - 1], off_distance_coef + new_distance_coef, off_distance_coef);
+        total_distance_coef = total_distance_coef + new_distance_coef;
+    };
+
+    (off_distance_coef, total_distance_coef)
+}
+
+fn main() where Field[N], Vectorization {
+    // FixedPoint parameters
+    let len = get_public("len");
+    let pplen = get_public("pplen");
+
+    // Highway-tax specific parameters
+    let max_allowed_distance : uint[N] $post @public = wire{get_public("max_allowed_distance")};
+
+    // Poseidon-specific parameters
+    let t : uint[N] $post @public = wire{get_public("t")};
+    let r : uint[N] $post @public = wire{get_public("r")};
+    let o : uint[N] $post @public = wire{get_public("o")};
+    let alpha : uint[N] $post @public = wire{get_public("alpha")};
+    let R_F : uint[N] $post @public = wire{get_public("R_F")};
+    let R_P : uint[N] $post @public = wire{get_public("R_P")};
+    let round_constants_pre : list[uint[N] $pre @public] = get_public("round_constants");
+    let mds_matrix_pre : list[list[uint[N] $pre @public]] = get_public("mds_matrix");
+
+    // Wire the round constants and the MDS matrix
+    let round_constants : list[uint[N] $post @public] =
+    for i in 0..length(round_constants_pre) {
+        wire{round_constants_pre[i]}
+    };
+    let mds_matrix : list[list[uint[N] $post @public]] =
+    for i in 0..length(mds_matrix_pre) {
+        let row : list[uint[N] $post @public] = 
+        for j in 0..length(mds_matrix_pre[i]) {
+            wire{mds_matrix_pre[i][j]}
+        };
+        row
+    };
+
+    let triangles : list[Triangle[N, $post, @public]] = read_triangles(len, pplen);
+
+    let bw : u64 $pre @public = log2(N) as u64 - 1;
+    let mut sizeasserters : list[SizeAsserter[N, $post, @prover]] = sizeasserters_new(bw);
+    // NB! We assume the points of the car are temporally ordered
+    let res = pad_car_coords(len, pplen, r as $pre as u64, ref sizeasserters);
+    let padded_car_points = res.0;
+    let hashable_car_coords = res.1;
+
+    // Calculate hash of coordinates on the circuit
+    let res_hash : list[uint[N] $post @prover] = poseidon(hashable_car_coords, t, r, o, alpha, R_F, R_P, round_constants, mds_matrix, true);
+    for i in 0..o as $pre as u64 {
+        dbg_print(to_string(res_hash[i] as $pre));
+    };
+    // Verify the hash
+    let true_hash : list[uint[N] $pre @verifier] $pre @verifier = get_instance("coordinates_hash");
+    for i in 0..o as $pre as u64 {
+        assert_zero((wire{true_hash[i as @verifier]}) as @prover - res_hash[i]);
+    };
+
+    // Find the distance the car traveled off the highway and the total distance it traveled
+    let distance_coefs = distance_off_highway(triangles, padded_car_points);
+    let off_distance : Fixed[N, $post, @prover] = fixed3(distance_coefs.0, len, pplen, ref sizeasserters);
+    let total_distance : Fixed[N, $post, @prover] = fixed3(distance_coefs.1, len, pplen, ref sizeasserters);
+    dbg_print(fixed_to_string(off_distance));
+    dbg_print(fixed_to_string(total_distance));
+    trace "Check that the distance travelled on the road did not exceed maximum allowed distance" {
+        assert(lt_fixed3(sub_fixed3(total_distance, off_distance, ref sizeasserters), uint_to_fixed3(max_allowed_distance as @prover, len, pplen, ref sizeasserters), ref sizeasserters));
+    }
+}

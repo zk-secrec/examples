@@ -1,0 +1,53 @@
+/* Log processing use case: Negative variant (proving that none of the given iocs occurs in the text)
+
+Features: No complex techniques except is_zero.
+
+*/
+
+use Std::*;
+use Integer::*;
+
+// Must be a prime greater than 65536 times the total length of all iocs (in bytes)
+type N : Nat = 2305843009213693951;
+
+fn scalar_prod_vec[N : Nat, $S, @D]
+( xs : arr[uint[N] $S @D]
+, ys : arr[uint[N] $S @D]
+) -> uint[N] $S @D
+where Vectorization
+{ sum(xs *. ys)
+}
+
+fn verify_single
+( text : arr[uint[N] $post @prover]
+, ioc : arr[uint[N] $post @prover]
+) -> uint[N] $post @prover 
+where Vectorization
+{ let n = length(text)
+; let m = length(ioc)
+; let sqsums = for i in 0 .. n - m + 1 
+  { let vec = text[i .. i + m] -. ioc
+  ; scalar_prod_vec(vec, vec)
+  }
+; prod(sqsums)
+}
+
+fn verify
+( text : arr[uint[N] $post @prover]
+, iocs : list[arr[uint[N] $post @prover]]
+) 
+where Field[N], Vectorization
+{ assert(!is_zero(prod(for k in 0 .. length(iocs) { verify_single(text, iocs[k]) })));
+}
+
+fn main()
+where Field[N], Vectorization
+{ let n = get_public("text_len")
+; let ms : list[u64 $pre @public] = get_public("ioc_len_list")
+; let iocs_pre : list[list[uint[N] $pre @verifier] $pre @verifier] $pre @verifier = get_instance("ioc_list")
+; let iocs = for i in 0 .. length(ms) { array_to_prover(pre_uint_list_to_post_array(iocs_pre[i as @verifier], ms[i])) }
+; let text_pre = get_witness("text")
+; let text = pre_uint_list_to_post_array(text_pre, n)
+; verify(text, iocs)
+;
+}

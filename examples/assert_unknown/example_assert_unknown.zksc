@@ -1,0 +1,7 @@
+//type N : Nat = 1030307;
+type N : Nat = 0x1fffffffffffffff;
+
+fn main() where Field[N] {
+    let b : bool[N] $post @verifier = wire { get_instance("b") } ;
+    assert(b);
+}

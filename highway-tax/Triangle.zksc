@@ -1,0 +1,60 @@
+use Std::*;
+use Integer::*;
+use FixedPoint::*;
+use Inequalities::*;
+use Coord::*;
+
+pub type Triangle[N : Nat, $S, @D] : Qualified = tuple[Coord[N, $S, @D], Coord[N, $S, @D], Coord[N, $S, @D]] $pre @public;
+
+// Cast a Triangle to $pre stage
+pub fn triangle_pre[N : Nat, $S, @D](triangle : Triangle[N, $S, @D]) -> Triangle[N, $pre, @D]
+    where Field[N] {
+    (
+        coord_pre(triangle.0),
+        coord_pre(triangle.1),
+        coord_pre(triangle.2)
+    )
+}
+
+// Cast a Triangle to @prover domain
+pub fn triangle_prover[N : Nat, $S, @D](triangle : Triangle[N, $S, @D]) -> Triangle[N, $S, @prover]
+    where Field[N] {
+    (
+        coord_prover(triangle.0),
+        coord_prover(triangle.1),
+        coord_prover(triangle.2)
+    )
+}
+
+// Calculate the doubled area of a given triangle, multiplied by 2^(2*pplen)
+// Note that we assume the points of the triangle have (unsigned) integer coordinates
+pub fn triangle_area_doubled[N : Nat, $S, @D](p0 : Coord[N, $S, @D], p1 : Coord[N, $S, @D], p2 : Coord[N, $S, @D]) -> uint[N] $S @D
+    where Field[N], Vectorization {
+
+    let plus : uint[N] $S @D = p0.0.coef * p1.1.coef + p1.0.coef * p2.1.coef + p2.0.coef * p0.1.coef;
+    let minus : uint[N] $S @D = p0.0.coef * p2.1.coef + p1.0.coef * p0.1.coef + p2.0.coef * p1.1.coef;
+
+    // If p0, p1, p2 was a clockwise orientation, then plus - minus would be negative, so absolute value is needed
+    let mut sizeasserter : SizeAsserter[N, $S, @D] = sizeasserter_new(log2(N) as u64 - 2);
+    uint_cond(ge3(plus, minus, ref sizeasserter), plus - minus, minus - plus)
+}
+
+// Calculate the doubled area of a given triangle with counter-clockwise orientation of points p0, p1, p2, multiplied by 2 ^ (2 * pplen)
+// Use this function only if you know that p0, p1, p2 are in counter-clockwise order
+// Note that we assume the points of the triangle have (unsigned) integer coordinates
+pub fn triangle_area_doubled_oriented[N : Nat, $S, @D](p0 : Coord[N, $S, @D], p1 : Coord[N, $S, @D], p2 : Coord[N, $S, @D]) -> uint[N] $S @D
+    where Field[N] {
+
+    // These will be the $pre versions of the vertices with integer coordinates
+    let p0_up : tuple[uint $pre @prover, uint $pre @prover] = (p0.0.coef as $pre as @prover as uint, p0.1.coef as $pre as @prover as uint); 
+    let p1_up : tuple[uint $pre @prover, uint $pre @prover] = (p1.0.coef as $pre as @prover as uint, p1.1.coef as $pre as @prover as uint); 
+    let p2_up : tuple[uint $pre @prover, uint $pre @prover] = (p2.0.coef as $pre as @prover as uint, p2.1.coef as $pre as @prover as uint);
+
+    let plus_pre : uint $pre @prover = p0_up.0 * p1_up.1 + p1_up.0 * p2_up.1 + p2_up.0 * p0_up.1;
+    let minus_pre : uint $pre @prover = p0_up.0 * p2_up.1 + p1_up.0 * p0_up.1 + p2_up.0 * p1_up.1;
+    
+    dbg_assert(plus_pre > minus_pre);
+
+    // Since the points are in counter-clockwise order, this will be the correct (positive) doubled area of the triangle, multiplied by 2 ^ (2 * pplen)
+    p1.0.coef * p2.1.coef - p1.1.coef * p2.0.coef + p0.1.coef * (p2.0.coef - p1.0.coef) + p0.0.coef * (p1.1.coef - p2.1.coef)
+}

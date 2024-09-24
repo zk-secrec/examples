@@ -1,0 +1,32 @@
+type N : Nat = 0x1fffffffffffffff;
+
+fn main() where Field[N], PermutationCheck, Vectorization {
+    let xs : arr[uint[N] $post @prover] = freeze([
+        2, 4, 3, 2, 4, 3,
+        4, 3, 2, 4, 3, 2,
+        2, 3, 4, 2, 3, 4,
+        3, 2, 4, 3, 2, 4]);
+    let ys : arr[uint[N] $post @prover] = freeze([
+        4, 3, 2, 4, 3, 2,
+        2, 3, 4, 2, 3, 4,
+        2, 4, 3, 2, 4, 3,
+        3, 2, 4, 3, 2, 4]);
+    // vectors (1-dimensional tensors):
+    __assert_perm(xs, ys);
+    // 2-dimensional tensors (4x6 matrices), xs can be transformed to ys by permuting rows:
+    let xs = unflatten(xs, [4, 6]);
+    let ys = unflatten(ys, [4, 6]);
+    __assert_perm(xs, ys);
+    // 3-dimensional tensors (with dimensions 4x3x2):
+    let xs = unflatten(flatten(xs), [4, 3, 2]);
+    let ys = unflatten(flatten(ys), [4, 3, 2]);
+    __assert_perm(xs, ys);
+    // slices:
+    let xs : arr[uint[N] $post @prover] = freeze([8,3,2,5,1,4,6]);
+    let ys : arr[uint[N] $post @prover] = freeze([3,2,5,1,4,6,7]);
+    // the following would fail, as xs and ys are not permutations of each other:
+    //__assert_perm(xs, ys);
+    // the following slices are permutations of each other:
+    __assert_perm(xs[1..], ys[..6]);
+    __assert_perm(xs[2..6], ys[1..5]);
+}

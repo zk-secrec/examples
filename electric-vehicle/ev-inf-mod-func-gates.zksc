@@ -1,0 +1,294 @@
+use Std::*;
+use Integer::*;
+use Poseidon::*;
+use Bitextract::*;
+use Inequalities::*;
+use FixedPoint::*;
+use SqrtUtil::*;
+
+// Assumes that initial coordinates are integers that can be represented 
+// as fixed point numbers with len and pplen given as public constants
+
+//2^73-69 for 35-bit numbers
+//type N : Nat = 0x1FFFFFFFFFFFFFFFFBB;
+
+//M61 for emp backend. len=29 with this modulus.
+type N : Nat = 0x1FFFFFFFFFFFFFFF;
+
+struct Point[N : Nat, @D] {
+  x : Fixed[N, $post, @D],
+  y : Fixed[N, $post, @D],
+}
+
+fn point_to_prover[N : Nat, @D]
+( p : Point[N, @D]
+) -> Point[N, @prover]
+{ Point { x: fixed_prover(p.x), y: fixed_prover(p.y) }
+}
+
+struct Circle[N : Nat] {
+  center : Point[N, @public],
+  r_coef_sqr : Checked[N, $post, @public] //radius fixedpoint repr coef squared
+}
+
+/*
+check_fit checks whether the set bits in uint[N] fit inside the given len. 
+This is used to do (relatively) cheap comparison operations rather than
+having to do lexicographic sorting.
+
+Fixed-point number coefs are n bits while the modulus is at least 2n+1 bits.
+This means that comparing two coefs can be done by subtraction.
+a < b can be replaced with b-a, and checking whether the result is in len bits
+
+if b < a, then the result is negative and it underflows into a large group object
+but given the sizes, it can't loop back around into being a len bit large element again
+*/
+fn check_fit[N : Nat](coef : uint[N] $post @prover, len : u64 $pre @public) 
+  where Field[N] {
+  let trash = bitextract(coef, len);
+}
+
+/*
+//this version is used *ONLY* for radius checks (no square root)
+//requires N prime, N must have at least 2*len+2 bits.
+//finds the distance between two points a,b. 
+//the distance is returned in the form of the coefficient of the appropriate Fixed number
+//it is not as a Fixed number for performance (can compare coefs)
+fn dist_nosqrt_coef(a : Coord[N], b : Coord[N], p2k : uint[N] $post @public) -> uint[N] $post @prover
+  where Field[N] {
+    let a0 = a.0.coef;
+    let a1 = a.1.coef;
+    let b0 = b.0.coef;
+    let b1 = b.1.coef;
+
+    let mid = sqr(a0 - b0) + sqr(a1 - b1);
+    let res = wire{mid as $pre / (p2k as $pre as @prover)};
+    let left = res*p2k as @prover;
+    let right = left + p2k as @prover;
+
+    trace "Radius distance^2 coefficient correctness checks" {
+      //Removing this check means that the return value c can be larger than the true distance value x
+      //This is OK because this function is only used for radius checks, so c < r^2
+      //Returning a larger c gives no advantage to that check.
+      //check_fit(mid - left, a.0.len);
+      check_fit(right - mid, a.0.len);
+      univ_assert(!is_zero(right-mid));
+    }
+    res
+}
+*/
+
+sieve fn threebitselect[N : Nat, @D](x : uint[N] $post @D, y : uint[N] $post @D, z : uint[N] $post @D) -> uint[N] $post @D {
+  let p = y * z;
+  let s = y + z - p;
+  s + (p - s) * x
+}
+
+sieve fn less_than[N : Nat, @D](x : uint[N] $post @D, y : uint[N] $post @D, bw : u64 $pre @public) -> bool[N] $post @D
+  where Field[N], Vectorization {
+  let xb : list[bool[N] $post @D] = bitextract(x, bw);
+  let yb : list[bool[N] $post @D] = bitextract(y, bw);
+
+  let mut res : uint[N] $post @D =  (1 - (xb[0] as uint[N])) * (yb[0] as uint[N]);
+  for i in 1 .. bw {
+    res = threebitselect(xb[i] as uint[N], yb[i] as uint[N], res);
+  }
+  uint_to_bool(res)
+}
+
+sieve fn dist_sqr_helper[N : Nat, @D](a : Point[N, @D], b : Point[N, @D]) -> uint[N] $post @D {
+
+  sqr(a.x.coef - b.x.coef) + sqr(a.y.coef - b.y.coef)
+
+}
+
+//this version is used for distance calculating (includes square root)
+sieve fn dist_inf(a : Point[N, @prover], b : Point[N, @prover], p2k : uint[N] $post @public) -> uint[N] $post @prover
+  where Field[N] {
+  let len = a.x.len;
+  let pplen = a.x.pplen;
+
+  let mid = dist_sqr_helper(a, b);
+  let dist_sqr_coef : uint $pre @prover = (mid as $pre / p2k as $pre as @prover) as uint;
+
+  let dist_coef = wire{sqrt_coef(dist_sqr_coef,pplen) as uint[N]};
+
+  let left = mid - dist_coef * dist_coef;
+
+  trace "Checking line segment distance coefficient correctness" {
+    check_fit(left, len - 1);
+    check_fit(dist_coef + dist_coef - left, len - 1);
+  }
+
+  // Don't need to return a FixedPoint, can just sum all the distance coefficients (and check that the result fits into len bits) later
+  dist_coef
+}
+
+sieve fn uint_cond_sieve[M : Nat, N : Nat, @D](b : bool[M] $post @D, x : uint[N] $post @D, y : uint[N] $post @D) -> uint[N] $post @D
+  where Field[N], Convertible[M, N] {
+  if (@prover <= @D) {
+    b as uint[M] as uint[N] * x + !b as uint[M] as uint[N] * y
+  } else {
+    wire { if (b as bool[N] as $pre) { x as $pre } else { y as $pre } }
+  }
+}
+
+fn read_coords2(len : u64 $pre @public, pplen : u64 $pre @public, ref sizeasserters : list[SizeAsserter[N, $post, @prover]]) -> list[Point[N, @prover]] 
+where Field[N] {
+  let points : list[list[uint[N] $pre @prover] $pre @prover] $pre @prover = get_witness("coordinates");
+  let max_coords = get_public("max_coordinates");
+
+  let len_coords = length(points);
+  trace "Provided more coordinates than max" {
+    dbg_assert(len_coords <= max_coords as @prover);
+  }
+
+  let all_wires : list[uint[N] $post @prover] = for i in 0..2*max_coords {
+    let row = if ((i/2) as @prover < len_coords) {(i/2) as @prover} else {len_coords-1};
+    wire{points[row][i as @prover%2]}
+  };
+
+  hash_coords_poseidon(all_wires,2*max_coords);
+
+  for i in 0..max_coords {
+    let row = if i as @prover < len_coords {i as @prover} else {len_coords-1};
+    Point { 
+      x: uint_to_fixed3(all_wires[2*i],len,pplen,ref sizeasserters), 
+      y: uint_to_fixed3(all_wires[2*i+1],len,pplen,ref sizeasserters) 
+    }
+  }
+}
+
+fn hash_coords_poseidon(data : list[uint[N] $post @prover] $pre @public, data_length : u64 $pre @public) where Field[N] {
+    let t : uint[N] $post @public = wire{get_public("t_61")};
+    let r : uint[N] $post @public = wire{get_public("r_61")};
+    let o : uint[N] $post @public = wire{get_public("o_61")};
+    let alpha : uint[N] $post @public = wire{get_public("alpha_61")};
+    let R_F : uint[N] $post @public = wire{get_public("R_F")};
+    let R_P : uint[N] $post @public = wire{get_public("R_P_61")};
+    let round_constants_pre : list[uint[N] $pre @public] = get_public("round_constants_61");
+    let mds_matrix_pre : list[list[uint[N] $pre @public]] = get_public("mds_matrix_61");
+
+    let round_constants : list[uint[N] $post @public] = for i in 0..length(round_constants_pre) {
+                                                          wire{round_constants_pre[i]}
+                                                        };
+    let mds_matrix : list[list[uint[N] $post @public]] =
+    for i in 0..length(mds_matrix_pre) {
+        let row : list[uint[N] $post @public] = 
+        for j in 0..length(mds_matrix_pre[i]) {
+            wire{mds_matrix_pre[i][j]}
+        };
+        row
+    };   
+    
+    // Calculate hash
+    let output : list[uint[N] $post @prover] = poseidon(data, t, r, o, alpha, R_F, R_P, round_constants, mds_matrix, true);
+ 
+    // Verify hash
+    let true_hash : list[uint[N] $pre @verifier] $pre @verifier = get_instance("hash_root");
+    for i in 0..length(output) {
+        assert_zero(output[i] - ((wire{true_hash[i as @verifier]}) as @prover));
+    };
+}
+
+fn coord_amount() -> u64 $pre @prover {
+    let only_real : list[list[uint $pre @prover] $pre @prover] $pre @prover = get_witness("coordinates");
+    length(only_real) 
+}
+
+sieve fn circle_contains(point : Point[N, @prover], bw : u64 $pre @public, circle : Circle[N]) -> bool[N] $post @prover
+  where Field[N], Vectorization {
+    let coef : uint[N] $post @prover = dist_sqr_helper(point, point_to_prover(circle.center));
+    less_than(coef, circle.r_coef_sqr.val as @prover, bw)
+}
+
+sieve fn circles_contain(c : Point[N, @prover], rs : list[Circle[N]]) -> bool[N] $post @prover
+  where Field[N], Vectorization {
+    let bw = log2(N) as u64 - 1;
+    let bs = for i in 0 .. length(rs) { circle_contains(c, bw, rs[i]) };
+    any(bs)
+}
+
+fn sum_distance(points: list[Point[N, @prover]], circles : list[Circle[N]]) -> tuple[uint[N] $post @prover, uint[N] $post @prover] 
+  where Field[N], Vectorization {
+    let s_i : uint[N] $post @public = 0;
+
+    let len = points[0].x.len;
+    let pplen = points[0].x.pplen;
+    let p2k : uint[N] $post @public = wire {pow_pre(2,pplen)};
+
+    let mut s_circles_coef = s_i as @prover;
+    let mut s_total_coef = s_circles_coef;
+
+    let mut current_in_circles : bool[N] $post @prover = circles_contain(points[0],circles);
+
+    for i in 0..length(points)-1 {
+        let next_in_circles = circles_contain(points[i+1],circles);
+        let line_in_circles = current_in_circles & next_in_circles;
+        let d_coef : uint[N] $post @prover = dist_inf(points[i],points[i+1],p2k);
+
+        s_circles_coef = uint_cond_sieve(line_in_circles, s_circles_coef + d_coef, s_circles_coef);
+        current_in_circles = next_in_circles;
+
+        s_total_coef = s_total_coef + d_coef;
+    }
+
+    (s_total_coef, s_circles_coef)
+}
+
+fn read_circles[N : Nat](len : u64 $pre @public, pplen : u64 $pre @public, bw : u64 $pre @public) -> list[Circle[N]] 
+  where Field[N] {
+
+    let circles_pre : list[list[uint[N]]] = get_public("circles");
+    let p2k : uint[N] $pre @public = pow_pre(2,pplen);
+    let mut sizeasserter = sizeasserter_new(2*len+2);
+    for i in 0..length(circles_pre) {
+
+        let r_coef_sqr = wire{sqr(circles_pre[i][2]*p2k)};
+        let r_coef_sqr_checked = check_size(r_coef_sqr,ref sizeasserter);
+        Circle {
+          center: Point { 
+                    x: fixed_downcast(uint_to_fixed(circles_pre[i][0],len,pplen)), 
+                    y: fixed_downcast(uint_to_fixed(circles_pre[i][1],len,pplen))
+                  },
+          r_coef_sqr: r_coef_sqr_checked
+        }
+
+    }
+}
+
+fn assert_ge_fixed(x : Fixed[N, $post, @prover], y : Fixed[N, $post, @prover], ref sizeasserters : list[SizeAsserter[N, $post, @prover]]) 
+where Field[N] {
+  let overcover = sub_fixed3(x, y, ref sizeasserters);
+  let trash = fixed_nonnegative3(overcover.coef, overcover.len, overcover.pplen, ref sizeasserters);
+}
+
+fn main() where Field[N], Vectorization {
+    let bw : u64 $pre @public = log2(N) as u64 - 1;
+    let mut sizeasserters : list[SizeAsserter[N, $post, @prover]] = sizeasserters_new(bw);
+    let len : u64 $pre @public = get_public("len");
+    let pplen : u64 $pre @public = get_public("pplen");
+    let max_coords : u64 $pre @public = get_public("max_coordinates");
+    let points : list[Point[N, @prover]] = read_coords2(len,pplen,ref sizeasserters);
+    let circles : list[Circle[N]] = read_circles(len,pplen,bw);
+
+    let computed_sums = sum_distance(points, circles);
+    let total_distance : Fixed[N, $post, @prover] = fixed3(computed_sums.0, len, pplen, ref sizeasserters);
+    let circle_distance : Fixed[N, $post, @prover] = fixed3(computed_sums.1, len, pplen, ref sizeasserters);
+    dbg_print("total distance: "++(fixed_to_string(total_distance)));
+    dbg_print("total distance in circles: "++(fixed_to_string(circle_distance)));
+    let required_total_distance_pre : uint[N] $pre @verifier = get_instance("required_total_distance");
+    let required_total_distance : Fixed[N, $post, @prover] = fixed_prover(fixed_downcast(uint_to_fixed(required_total_distance_pre,len,pplen)));
+
+    trace "Comparing total distance travelled to required length" {
+      assert_ge_fixed(total_distance,required_total_distance,ref sizeasserters);
+    }
+
+    let eight = uint_to_fixed(8,len,pplen);
+    let ten = uint_to_fixed(10,len,pplen);
+    let point_eight : Fixed[N, $pre, @public] = div_fixed(eight,ten);
+    let required_circle_distance = mult_fixed3(total_distance,fixed_prover(fixed_downcast(point_eight)),ref sizeasserters);
+    trace "Checking if 80% of distance is in circles" {
+      assert_ge_fixed(circle_distance,required_circle_distance,ref sizeasserters);
+    }
+}

@@ -1,0 +1,9 @@
+{
+    "canary_len_list": [
+        "128"
+    ],
+    "ioc_len_list": [
+        "128"
+    ],
+    "text_len": "256"
+}

@@ -1,0 +1,174 @@
+// For testing, run
+//   ./runrust docs/example_primitive_types.zksc
+// in the compiler directory.
+
+/*
+Primitive Types
+
+Values of most types in ZK-SecreC are reference counted, making them cheap to clone by just increasing the reference count
+instead of making a deep copy of the data structure. However, for basic integers and booleans in the $pre domain,
+the overhead of reference counting is much larger than the cost of actually doing arithmetic or boolean operations on them,
+making those operations up to 2 orders of magnitude slower than they are in Rust. For this reason, we haved added to ZK-SecreC
+some of the primitive types of Rust. These types do not have reference counting, are available only in the $pre stage, and
+arithmetic, boolean, and comparison operations on them have speeds close those of the corresponding operations in Rust.
+
+The primitive types supported in ZK-SecreC and the corresponding Rust types are as follows:
+ZK-SecreC              Rust
+---------------------------
+() $pre @D             ()
+bool $pre @D           bool
+bool[N] $pre @D        bool
+u8 $pre @D             u8
+u16 $pre @D            u16
+u32 $pre @D            u32
+u64 $pre @D            u64
+u128 $pre @D           u128
+
+The unqualified types u8, u16, u32, u64, u128 are actually type synonyms defined in Std.zksc in the standard library:
+    pub type u8 : Unqualified = uint[0x100];
+    pub type u16 : Unqualified = uint[0x10000];
+    pub type u32 : Unqualified = uint[0x100000000];
+    pub type u64 : Unqualified = uint[0x10000000000000000];
+    pub type u128 : Unqualified = uint[0x100000000000000000000000000000000];
+Std.zksc also defines type synonyms b8, b16, b32, b64, b128 for the corresponding bool types obtained from
+comparing values of the uint types, e.g.
+    pub type b64 : Unqualified = bool[0x10000000000000000];
+For example, if x : u64 and y : u64 then (x >= y) : b64.
+
+The primitive type u64 $pre @D is special in that it is the type of loop and array/list indices.
+
+Primitive types can be domain-polymorphic or can have a concrete domain (e.g. @prover).
+The types must be known to be in the $pre stage at compile time. If they are stage-polymorphic then they will be reference-counted
+even if they are in the $pre stage at runtime.
+Booleans can also be polymorphic in the modulus but uints must have the modulus known at compile time,
+otherwise they will be reference-counted.
+
+The operations on primitive types that have speed close to the corresponding operations in Rust, are:
+* arithmetic operations +, -, *, /, %
+* comparison operations ==, !=, <, <=, >, >=
+* boolean operations &, |, xor, !
+
+
+Unboxed Arrays/Lists
+
+In this section the term array is used to include both ZK-SecreC arrays (arr[...]) and lists (list[...]).
+
+Arrays in ZK-SecreC can be internally boxed or unboxed, although there is no difference in the type of the array.
+Boxed arrays have each element separately reference counted, causing much more overhead when accessing the elements.
+The elements of boxed arrays can be of non-primitive or primitive type.
+Unboxed arrays do not have each element separately reference counted and the elements can only be of primitive type.
+All primitive types can be used as elements of unboxed arrays.
+Both boxed and unboxed arrays as a whole (as opposed to their individual elements) are always reference counted.
+
+When an array is created and its element type is known to be primitive at compile time then the array will automatically be unboxed.
+If the element type is not known to be primitive at compile time (i.e. in polymorphic functions) then the array will be boxed,
+even if at runtime the element type will be primitive.
+
+Boxed and unboxed arrays can be used interchangeably in ZK-SecreC code (but not FFI, as discussed in FFI documentation), i.e. an unboxed
+array can be given as an argument to a polymorphic function that expects a boxed array and a boxed array of primitive values returned from a
+polymorphic function can be used in non-polymorphic code that expects an unboxed array. Whole arrays are not automatically converted from
+boxed to unboxed or vice versa, instead individual elements of the array are converted between primitive types and reference-counted values
+as needed. This can cause some extra overhead. A for loop can be used to make a copy of an array with optimal boxedness for the current
+scope.
+*/
+
+use Std::*;
+
+fn main() {
+    // An example of using a primitive arithemtic, comparison, and boolean operation:
+    let x : u32 $pre @prover = 0xffffffff;
+    let b : b32 $pre @prover = (x + 1) != 0;
+    dbg_assert(!b);
+
+    // In the following we have some performance tests that show how much faster primitive types are compared to the non-primitive uint.
+    let n = 1000000;
+    let n2 = n / 1000;
+
+    dbg_print("Test: iterative computation on u64" : string $pre @prover);
+    let mut s = 0 : u64 $pre @prover;
+    let mut j = 0;
+    // 500 million iterations per second on a 5 GHz CPU core:
+    for i in 0 : u64 $pre @prover .. 500 * n {
+        let x = (j * j - j) / (j + 1);
+        s = s + x;
+        j = j + 1;
+    }
+    dbg_print(to_string(s));
+
+    dbg_print("Test: iterative computation on u32" : string $pre @prover);
+    let mut s = 0 : u32 $pre @prover;
+    let mut j = 0;
+    // 833 million iterations per second
+    for i in 0 : u64 $pre @prover .. 833 * n {
+        let x = (j * j - j) / (j + 1);
+        s = s + x;
+        j = j + 1;
+    }
+    dbg_print(to_string(s));
+
+    dbg_print("Test: iterative computation on u128" : string $pre @prover);
+    let mut s = 0 : u128 $pre @prover;
+    let mut j = 0;
+    // 500 million iterations per second
+    for i in 0 : u64 $pre @prover .. 500 * n {
+        let x = (j * j - j) / (j + 1);
+        s = s + x;
+        j = j + 1;
+    }
+    dbg_print(to_string(s));
+
+    dbg_print("Test: iterative computation on uint" : string $pre @prover);
+    let mut s = 0 : uint $pre @prover;
+    let mut j = 0;
+    // 6.5 million iterations per second (77 times slower than u64)
+    for i in 0 : u64 $pre @prover .. 6 * n {
+        let x = (j * j - j) / (j + 1);
+        s = s + x;
+        j = j + 1;
+    }
+    dbg_print(to_string(s));
+
+    // Arrays/lists of primitive values are unboxed
+    // (unless created inside polymorphic functions where the element type is not known at compile time):
+    let rec xs_u64 : list[u64 $pre @prover] $pre @prover = for i in 0 .. 1000 {
+        if (i == 0) {
+            0
+        } else {
+            xs_u64[i-1] + 1
+        }
+    };
+
+    // Arrays/lists of non-primitive values are boxed:
+    let rec xs_uint : list[uint $pre @prover] $pre @prover = for i in 0 .. 1000 {
+        if (i == 0) {
+            0
+        } else {
+            xs_uint[i-1] + 1
+        }
+    };
+
+    dbg_print("Test: accessing an unboxed array of u64 values" : string $pre @prover);
+    let mut s = 0;
+    // 1200 million iterations of the inner loop per second
+    for j in 0 : u64 $pre @prover .. 1200 * n2 {
+        for i in 0 .. length(xs_u64) {
+            let x = xs_u64[i];
+            s = s + x;
+        }
+        {}
+    }
+    dbg_print(to_string(s));
+
+    dbg_print("Test: accessing a boxed array of uint values" : string $pre @prover);
+    let mut s = 0;
+    // 44 million iterations of the inner loop per second (27 times slower than u64)
+    for j in 0 : u64 $pre @prover .. 44 * n2 {
+        for i in 0 .. length(xs_uint) {
+            let x = xs_uint[i];
+            s = s + x;
+        }
+        {}
+    }
+    dbg_print(to_string(s));
+
+}

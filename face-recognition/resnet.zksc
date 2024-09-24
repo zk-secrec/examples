@@ -1,0 +1,35 @@
+// ./runrust docs/resnet/resnet.zksc docs/resnet/resnet_public.json docs/resnet/resnet_instance.json docs/resnet/resnet_witness.json -e docs/resnet/resnet_externs.rs -o out
+
+use ResidualNetwork::*;
+use FastFixedPoint::*;
+use Bitextract::*;
+use Std::*;
+
+type N : Nat = 170141183460469231731687303715884105727; // 2^127-1
+
+fn main() where Field[N], Vectorization {
+    dbg_print("start" : string $pre @public);
+
+    let r : Resnet = init_resnet0(true);
+
+    let num_pixels = r.nr * r.nc;
+    let face_pre : list[list[uint $pre @prover] $pre @prover] $pre @prover = get_witness("face");
+    let face : list[list[uint[N] $post @prover]] =
+        for i in 0 .. 3 : u64 $pre @public {
+            for j in 0 .. num_pixels {
+                let x = wire{face_pre[j as @prover][i as @prover] as uint[N]};
+                // check that x is in the range 0..255
+                let trash = bitextract(x, 8);
+                x
+            }
+        };
+
+    let output = apply_resnet(r, face);
+
+    dbg_print("output of the final layer (128 values):" : string $pre @public);
+    for i in 0 .. length(output) {
+        dbg_print(fixed_to_string(output[i]));
+    }
+    dbg_assert(length(output) == 128);
+    {}
+}

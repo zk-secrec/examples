@@ -1,0 +1,70 @@
+/* Log processing use case: Positive variant (proving that all given canaries occur in the given text)
+
+Features: Witness contains occurrence positions for each canary, only the right substring of the text is checked for each canary. The implementation relies on Waksman networks.
+
+*/
+use Std::*;
+use Waksman::*;
+
+type N : Nat = 2305843009213693951; // Must be greater than the length of any access log
+
+fn check_canary
+( text : list[uint[N] $post @prover]
+, ind : uint[N] $post @prover
+, canary : arr[uint[N] $post @prover]
+, wn : list[u64 $pre @public]
+) 
+where Field[N], Vectorization
+{ let n = length(text)
+; let m = length(canary)
+; assert(wire { (n >= m) as bool[N] })
+; let ind_pre = ind as $pre as u64
+; let n_prover = n as @prover
+; let template = for i in 0 .. n 
+  { let i_prover = i as @prover
+  ; if (i_prover + ind_pre < n_prover) { i_prover + ind_pre } else { i_prover + ind_pre - n_prover }
+  }
+; let h = (length(wn) - n) / 2
+; let ss = switches_of_perm(template)
+; let switches = for i in 0 .. h { wire { ss[i] } }
+; let enum = for i in 0 .. n { (wire { i as uint[N] }) as @prover }
+; let enum_shifted = apply_switching_network_uint(enum, wn, switches)
+; for i in 0 .. n 
+  { if (i == 0) { assert_zero(enum_shifted[i] - ind) }
+    else 
+    { let diff = enum_shifted[i] - enum_shifted[i - 1]
+    ; assert_zero((diff - 1) * (diff - 1 + (wire { n as uint[N] }) as @prover))
+    }
+  ;
+  }
+; let text_shifted = apply_switching_network_uint(text, wn, switches)
+; let seg = freeze(text_shifted[0 .. m])
+; let diff : arr[uint[N] $post @prover] = canary -. seg
+; let res : arr[() $pre @public] = assert_zero.(diff)
+;
+}
+
+fn verify
+( text : list[uint[N] $post @prover]
+, ind_list : list[uint[N] $post @prover]
+, canaries : list[arr[uint[N] $post @prover]]
+) 
+where Field[N], Vectorization
+{ let n = length(text)
+; let wn = make_waksman_network(n)
+; for k in 0 .. length(canaries) { check_canary(text, ind_list[k], canaries[k], wn) }
+;
+}
+
+fn main() 
+where Field[N], Vectorization
+{ let n = get_public("text_len")
+; let ms : list[u64 $pre @public] = get_public("canary_len_list")
+; let canaries_pre : list[list[uint[N] $pre @verifier] $pre @verifier] $pre @verifier = get_instance("canary_list")
+; let canaries = for i in 0 .. length(ms) { array_to_prover(pre_uint_list_to_post_array(canaries_pre[i as @verifier], ms[i])) }
+; let text_pre : list[uint[N] $pre @prover] $pre @prover = get_witness("text")
+; let text = for i in 0 .. n { wire { text_pre[i as @prover] } }
+; let ind_list_pre : list[uint[N] $pre @prover] $pre @prover = get_witness("text_pos_list")
+; let ind_list = for i in 0 .. length(ms) { wire { ind_list_pre[i as @prover] } }
+; verify(text, ind_list, canaries);
+}

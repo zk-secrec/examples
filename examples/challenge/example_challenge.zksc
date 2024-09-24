@@ -1,0 +1,43 @@
+// In the following:
+//   ${COMPILER} should be the root directory of the compiler repository;
+//   ${EMPTOOLKIT} should be the root directory of the emp-experimental-field-switching repository.
+// For letting the prover produce the proof non-interactively, generating challenges by itself (for testing only, not secure):
+//   cd ${COMPILER}; ./runrust docs/example_challenge.zksc -i docs/example_cube_instance.json -w docs/example_cube_witness.json -o out
+// For the interactive proof (which requires a modified emp-toolkit), first generate the .rel file as the public party:
+//   cd ${COMPILER}; ./runrust docs/example_challenge.zksc -i docs/example_cube_instance.json -w docs/example_cube_witness.json --interactive localhost:12350 -o ${EMPTOOLKIT}/public --public
+// Create the named pipes for local communication, if not created yet:
+//   cd ${EMPTOOLKIT}
+//   mkfifo prover.ins
+//   mkfifo prover.wit
+//   mkfifo verifier.0wit
+//   mkfifo verifier.ins
+//   mkfifo verifier.emp
+// Then start prover's emp-toolkit in terminal 1:
+//   cd ${EMPTOOLKIT}; ./bin/empConvZK 2 127.0.0.1 1 12345 public.rel prover.ins prover.wit prover.emp
+// Then start verifier's emp-toolkit in terminal 2:
+//   cd ${EMPTOOLKIT}; ./bin/empConvZK 2 127.0.0.1 2 12345 public.rel verifier.ins verifier.0wit verifier.emp
+// Then start prover's ZKSCC in terminal 3:
+//   cd ${COMPILER}; ./runrust docs/example_challenge.zksc -i docs/example_cube_instance.json -w docs/example_cube_witness.json --interactive localhost:12350 -o ${EMPTOOLKIT}/prover
+// Wait until the Rust code compiles and starts running.
+// Then start verifier's ZKSCC in terminal 4:
+//   cd ${COMPILER}; ./runrust docs/example_challenge.zksc -i docs/example_cube_instance.json -w docs/example_cube_witness.json --interactive localhost:12350 -o ${EMPTOOLKIT}/verifier --verifier
+// After a while (maybe 5 seconds), the verifier should get "Proof accepted!" on terminal 2.
+
+type N : Nat = 2305843009213693951;
+
+fn main() 
+where Field[N] 
+{ let x : uint[N] $post @prover = wire { get_witness("x") }
+; let z_pre : uint[N] $pre @verifier = if (Challenge[N]) 
+                                       { dbg_print("Reading Verifier's input as challenge" : string $pre @public)
+                                       ; challenge(1)[0]
+                                       } else 
+                                       { dbg_print("Reading Verifier's input as ordinary instance" : string $pre @public)
+                                       ; get_instance("z") 
+                                       }
+; let z = wire { z_pre }
+;
+  // prover proves that it knows a value y such that multiplying the previously committed value x by y gives z
+  let y = wire { mod_div(z as $pre as @prover, x as $pre) }
+; assert_zero(z as @prover - x*y)
+}

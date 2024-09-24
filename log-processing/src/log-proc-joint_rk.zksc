@@ -1,0 +1,138 @@
+use Std::*;
+use Integer::*;
+use Prob::*;
+use RabinKarp::*;
+
+type N : Nat = 2305843009213693951;
+
+fn generate_base() -> uint[N] $post @verifier 
+where Field[N], Challenge[N]
+{ wire { challenge(1)[0] }
+}
+
+unchecked eff [*] -> [[*]] -> * -> * ! @prover
+fn compute_base
+( text : list[uint[N] $pre @prover]
+, iocs : list[list[uint[N] $pre @verifier]]
+, base : uint[N] $pre @prover
+) -> uint[N] $pre @prover 
+where Field[N]
+{ let n = length(text)
+; let m = length(iocs[0])
+; let l = length(iocs)
+; let mut flag = false
+; let vns = for k in 0 .. l { prefixvalue(iocs[k], m, base) }
+; let mut vt = prefixvalue(text, m, base)
+; let largestpower = pow_pre(base, m - 1)
+; for i in 0 .. n - m + 1 
+  { for j in 0 .. l 
+    { flag = flag | (vt - vns[j] == 0) as bool
+    //; if (flag) { break; }
+    }
+//    if (flag) { break; };
+    ; if (i < n - m) 
+      { vt = shiftvalue(text, i, m, base, vt, largestpower)
+      }
+  }
+  if (flag) { compute_base(text, iocs, base + 1) } else { base }
+}
+
+// Assumes that iocs and all its elements are non-empty and contains iocs of equal length
+fn verify_single_ioclist
+( text : list[uint[N] $post @prover]
+, iocs : list[list[uint[N] $post @verifier]]
+) -> uint[N] $post @prover 
+where Field[N]
+{ let n = length(text)
+; let m = length(iocs[0])
+; let l = length(iocs)
+; let text_pre = for i in 0 .. n { text[i] as $pre }
+; let iocs_pre = for k in 0 .. l { for j in 0 .. m { iocs[k][j] as $pre } }
+; let base = wire { compute_base(text_pre, iocs_pre, 0) }
+; let vns = for k in 0 .. l { prefixvalue(iocs[k], m, base) }
+; let mut vt = prefixvalue(text, m, base)
+; let largestpower = pow_pre(base, m - 1)
+; let localprods = for i in 0 .. n - m + 1 
+  { let p = prod(for j in 0 .. l { vt - vns[j] })
+  ; if (i < n - m) 
+    { vt = shiftvalue(text, i, m, base, vt, largestpower) 
+    }
+  ; p
+  }
+; prod(localprods)
+}
+
+// Assumes that canaries is non-empty
+// Assumes that text length * sum of lengths of canaries is considerably less than N
+fn verify_single_canarylist
+( text : arr[uint[N] $post @prover]
+, canaries : list[arr[uint[N] $post @prover]]
+, max_len : u64 $pre @public
+) 
+where Field[N], Challenge[N], Vectorization
+{ let n = length(text)
+; let m = length(canaries[0])
+; let k = length(canaries)
+; assert(wire { (n >= m) as bool[N] })
+// ; let mut table = for j in 0 .. k { for i in 0 .. n - m + 1 { 1 }}
+; let prob_log = 1 + log2(N) - log2((m * (n - m) * k) as uint)
+; for z in 0 .. repetition_times(prob_log, 80) 
+  { let base = generate_base()
+  ; let pows = powers(base, max_len)
+  ; let vnss : list[arr[uint[N] $post @prover] $pre @public] = for j in 0 .. k 
+    { let elem = arr_scalar_prod(canaries[j], pows, m)
+    ; freeze([elem; n - m + 1])
+    }
+  ; let largestpower = wire { pow_pre(base as $pre, m - 1) }
+  ; let rec vts_list = for i in 0 .. n - m + 1
+    { if (i == 0) { arr_scalar_prod(text, pows, m) }
+      else { shiftvalue(text, i - 1, m, base as @prover, vts_list[i - 1], largestpower as @prover) }
+    }
+  ; let vts = freeze(vts_list)
+  ; for j in 0 .. k { assert_zero(prod(vts -. vnss[j])) }
+  ;
+  }
+;
+}
+
+fn verify_ioclists
+( text : list[uint[N] $post @prover]
+, iocs_list : list[list[list[uint[N] $post @verifier]]]
+) 
+where Field[N]
+{ let l = length(iocs_list)
+; assert(!is_zero(prod(for i in 0 .. l { verify_single_ioclist(text, iocs_list[i]) })))
+;
+}
+
+fn verify_canarylists
+( text : arr[uint[N] $post @prover]
+, canaries_list : list[list[arr[uint[N] $post @prover]]]
+) 
+where Field[N], Challenge[N], Vectorization
+{ let max_len = length(canaries_list[length(canaries_list) - 1][0])
+; for k in 0 .. length(canaries_list) 
+  { verify_single_canarylist(text, canaries_list[k], max_len) 
+  }
+;
+}
+
+fn main() 
+where Field[N], Challenge[N], Vectorization
+{ let n = get_public("text_len")
+; let ils : list[u64 $pre @public] = get_public("ioc_len_list")
+; let cls : list[u64 $pre @public] = get_public("canary_len_list")
+; let iocs_pre : list[list[uint[N] $pre @verifier] $pre @verifier] $pre @verifier = get_instance("ioc_list")
+; let iocs = for i in 0 .. length(ils) { for j in 0 .. ils[i] { wire { iocs_pre[i as @verifier][j as @verifier] } } }
+; let iocs_grouped = group_by_length(sort_by_length(iocs))
+; let canaries_pre : list[list[uint[N] $pre @verifier] $pre @verifier] $pre @verifier = get_instance("canary_list")
+; let canaries = for i in 0 .. length(cls) { array_to_prover(pre_uint_list_to_post_array(canaries_pre[i as @verifier], cls[i])) }
+; let canaries_grouped = group_by_length(sort_by_length(canaries))
+; let text_pre = list_to_public_length(get_witness("text"), n)
+; let text_ioc = uint_list_to_post(text_pre)
+; let text_can = array_to_post(freeze(text_pre))
+; verify_ioclists(text_ioc, iocs_grouped)
+; verify_canarylists(text_can, canaries_grouped)
+;
+}
+

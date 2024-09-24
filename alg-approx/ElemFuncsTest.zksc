@@ -1,0 +1,22 @@
+use ElemFuncs::*;
+use Inequalities::*;
+use FixedPoint::*;
+use fixed_floor_and_frac::*;
+
+type N : Nat = 1267650600228229401496703205361;
+
+fn main()
+where Field[N], ExtendedArithmetic
+{
+  let len = 40;
+  let pplen = 30;
+  let max_error: Fixed[N, $pre, @public] = Fixed { coef: 1, pplen: pplen, len: len}; 
+  let myparams: AlgFuncParameters[N] = get_params("sin_quarter", max_error);
+
+  let mut sizeasserters = sizeasserters_new(len+1);
+
+  let x: Fixed[N, $post, @prover] = uint_to_fixed3(1, len, pplen, ref sizeasserters);
+  let y = fixed_sin(myparams, x, ref sizeasserters);
+  dbg_print("WOWE": string);
+  dbg_print(fixed_to_string(y));
+}

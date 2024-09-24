@@ -1,0 +1,87 @@
+/* Log processing use case: Negative variant (proving that none of the given iocs occurs in the text)
+
+Features: IOC length ordering optimization, Rabin-Karp algorithm with computation with small modulus (2^61-1). To avoid false positives, Prover is asked to provide appropriate base for each ioc length on which substrings are evaluated and compared.
+
+*/
+
+use Std::*;
+use Integer::*;
+use RabinKarp::*;
+
+type N : Nat = 2305843009213693951;
+
+unchecked eff [*] -> [[*]] -> * -> * ! @prover
+fn compute_base
+( text : list[uint[N] $pre @prover]
+, iocs : list[list[uint[N] $pre @verifier]]
+, base : uint[N] $pre @prover
+) -> uint[N] $pre @prover 
+where Field[N]
+{ let n = length(text)
+; let m = length(iocs[0])
+; let l = length(iocs)
+; let mut flag : bool $pre @prover = false
+; let vns = for k in 0 .. l { prefixvalue(iocs[k], m, base) }
+; let mut vt = prefixvalue(text, m, base)
+; let largestpower : uint[N] $pre @prover = pow_pre(base, m - 1)
+; for i in 0 .. n - m + 1 
+  { for j in 0 .. l 
+    { flag = flag | (vt - vns[j] == 0) as bool
+    //; if (flag) { break; }
+    }
+//    if (flag) { break; };
+  ; if (i < n - m) 
+    { vt = shiftvalue(text, i, m, base, vt, largestpower)
+    }
+  }
+  if (flag) { compute_base(text, iocs, base + 1) } else { base }
+}
+
+// Assumes that iocs and all its elements are non-empty and contains iocs of equal length
+fn verify_single
+( text : list[uint[N] $post @prover]
+, iocs : list[list[uint[N] $post @verifier]]
+) -> uint[N] $post @prover 
+where Field[N]
+{ let n = length(text)
+; let m = length(iocs[0])
+; let l = length(iocs)
+; let text_pre = for i in 0 .. n { text[i] as $pre }
+; let iocs_pre = for k in 0 .. l { for j in 0 .. m { iocs[k][j] as $pre } }
+; let base = wire { compute_base(text_pre, iocs_pre, 0) }
+; let vns = for k in 0 .. l { prefixvalue(iocs[k], m, base) }
+; let mut vt = prefixvalue(text, m, base)
+; let largestpower = pow_pre(base, m - 1)
+; let localprods = for i in 0 .. n - m + 1 
+  { let p = prod(for j in 0 .. l { vt - vns[j] })
+  ; if (i < n - m) 
+    { vt = shiftvalue(text, i, m, base, vt, largestpower) 
+    }
+  ; p
+  }
+; prod(localprods)
+}
+
+fn verify
+( text : list[uint[N] $post @prover]
+, iocs_list : list[list[list[uint[N] $post @verifier]]]
+) 
+where Field[N]
+{ let l = length(iocs_list)
+; assert(!is_zero(prod(for i in 0 .. l { verify_single(text, iocs_list[i]) })))
+;
+}
+
+fn main() 
+where Field[N]
+{ let n : u64 $pre @public = get_public("text_len")
+; let ms : list[u64 $pre @public] = get_public("ioc_len_list")
+; let m = length(ms)
+; let iocs_pre : list[list[uint[N] $pre @verifier] $pre @verifier] $pre @verifier = get_instance("ioc_list")
+; let iocs = for i in 0 .. length(ms) { for j in 0 .. ms[i] { wire { iocs_pre[i as @verifier][j as @verifier] } } }
+; let text_pre : list[uint[N] $pre @prover] $pre @prover = get_witness("text")
+; let text = for j in 0 .. n { wire { text_pre[j as @prover] } }
+; let a = group_by_length(sort_by_length(iocs))
+; verify(text, a)
+;
+}

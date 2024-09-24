@@ -1,0 +1,910 @@
+// Based on dlib's code, mostly scan_fhog_pyramid.h, fhog.h, spatial_filtering.h, object_detector.h, frontal_face_detector.h
+
+use Std::*;
+use Integer::*;
+use Vec::*;
+use FastFixedPoint::*;
+use FastFixedPointVec::*;
+
+type N : Nat = 170141183460469231731687303715884105727; // 2^127-1
+
+type Int : Qualified = uint[N] $post @prover; // signed or unsigned integer
+
+pub fn fixed_to_string_2[N : Nat, $S, @D](f : Fixed[N, $S, @D], n : uint $pre @D) -> string $pre @D
+  where Field[N] {
+  let coef_pre = signed_uintN_to_uint(f.coef as $pre);
+  let sign = coef_pre < 0;
+  let coef = if (sign) { -coef_pre } else { coef_pre };
+  let pplennr = pow_pre_inf(2,f.pplen);
+  let wholes = coef / pplennr;
+  let s_sign = if (sign) {"-"} else {""};
+  let s : string $pre @D = s_sign ++ (to_string(wholes)++".");
+
+  s ++ fractional_string_2(coef - wholes*pplennr,pplennr,false, n)
+}
+
+fn fractional_string_2[N : Nat, @D](coef : uint[N] $pre @D, pplennr : uint[N] $pre @D,nonempty : bool[N] $pre @D, n : uint $pre @D) -> string $pre @D {
+  if (coef == 0 | n as uint[N] == 0) {
+    if (nonempty) {""} else {"0"}
+  } else {
+      let fractional_part = coef * 10;
+      let whole = fractional_part / pplennr;
+      let remaining = fractional_part - whole*pplennr;
+      to_string(whole) ++ fractional_string_2(remaining,pplennr,true, n-1)
+  }
+}
+
+fn create_hog(image : list[list[Int]]) -> list[list[FixedVec[N]]] where Field[N], Vectorization {
+    dbg_print("create_hog: start" : string $pre @public);
+    let num_rows = length(image);
+    let num_cols = length(image[0]);
+
+    let cell_size = 8;
+    let half_cell_size = cell_size / 2;
+    dbg_assert(cell_size == 2 * half_cell_size);
+    let cells_nr = (num_rows + half_cell_size) / cell_size + 1; // by 1 larger than in dlib
+    let cells_nc = (num_cols + half_cell_size) / cell_size + 1; // by 1 larger than in dlib
+    let visible_nr = min_pre(cells_nr * cell_size, num_rows) - 1;
+    let visible_nc = min_pre(cells_nc * cell_size, num_cols) - 1;
+    let cell_area = cell_size * cell_size;
+    let num_cells = cells_nr * cells_nc;
+
+    let mut grad0 : list[Int] = [];
+    let mut grad1 : list[Int] = [];
+    for i in 0 .. cell_size {
+        for j in 0 .. cell_size {
+            for k in 0 .. cells_nr {
+                for l in 0 .. cells_nc {
+                    let r = k * cell_size + i - 4;
+                    let c = l * cell_size + j - 4;
+                    if (r > 0 & c > 0 & r < visible_nr & c < visible_nc) {
+                        list_push(ref grad0, image[r][c+1] - image[r][c-1]);
+                        list_push(ref grad1, image[r+1][c] - image[r-1][c]);
+                    } else {
+                        list_push(ref grad0, 0);
+                        list_push(ref grad1, 0);
+                    }
+                }
+                {}
+            }
+            {}
+        }
+        {}
+    }
+    let grad0 = freeze(grad0);
+    let grad1 = freeze(grad1);
+    // grad0 and grad1 contain signed 9-bit integers
+    let nonneg_grad0 = is_nonnegative_uv(grad0, 9);
+    let nonneg_grad1 = is_nonnegative_uv(grad1, 9);
+    let sign_grad0 = add_uint_uv(-1, mul_uint_uv(2, nonneg_grad0)); // 1 = nonnegative, -1 = negative
+    let sign_grad1 = add_uint_uv(-1, mul_uint_uv(2, nonneg_grad1));
+    let abs_grad0 : arr[Int] = sign_grad0 *. grad0;
+    let abs_grad1 : arr[Int] = sign_grad1 *. grad1;
+    // sines and cosines of 20, 40, 60, 80 degrees, multiplied by 2^14:
+    let cos20 = 15396; let sin20 =  5604;
+    let cos40 = 12551; let sin40 = 10531;
+    let cos60 =  8192; let sin60 = 14189;
+    let cos80 =  2845; let sin80 = 16135;
+    let cos0  = 16384;
+    // dot products of the gradient vector with unit vectors of different directions (multiplied by 2^14, 22-bit unsigned integers):
+    let dot0  : arr[Int] = mul_uint_uv(cos0,  abs_grad0);
+    let dot20 : arr[Int] = mul_uint_uv(cos20, abs_grad0) +. mul_uint_uv(sin20, abs_grad1);
+    let dot40 : arr[Int] = mul_uint_uv(cos40, abs_grad0) +. mul_uint_uv(sin40, abs_grad1);
+    let dot60 : arr[Int] = mul_uint_uv(cos60, abs_grad0) +. mul_uint_uv(sin60, abs_grad1);
+    let dot80 : arr[Int] = mul_uint_uv(cos80, abs_grad0) +. mul_uint_uv(sin80, abs_grad1);
+    // find which dot product is maximum, this determines the closest direction to the gradient vector
+    let diff20 = sub_uv(dot20, dot0); // 23-bit signed
+    let cmp20 = is_nonnegative_uv(diff20, 23); // dot20 >= dot0
+    let t20 : arr[Int] = cmp20 *. diff20;
+    let max20 : arr[Int] = dot0 +. t20; // max(dot0, dot20)
+    let diff40 = sub_uv(dot40, max20); // 23-bit signed
+    let cmp40 = is_nonnegative_uv(diff40, 23); // dot40 >= max20
+    let t40 : arr[Int] = cmp40 *. diff40;
+    let max40 : arr[Int] = max20 +. t40; // max(dot0, dot20, dot40)
+    let diff60 = sub_uv(dot60, max40); // 23-bit signed
+    let cmp60 = is_nonnegative_uv(diff60, 23); // dot60 >= max40
+    let t60 : arr[Int] = cmp60 *. diff60;
+    let max60 : arr[Int] = max40 +. t60; // max(dot0, dot20, dot40, dot60)
+    let diff80 = sub_uv(dot80, max60); // 23-bit signed
+    let cmp80 = is_nonnegative_uv(diff80, 23); // dot80 >= max60
+    let dir80 = cmp80; // 1 if dot80 is maximum
+    let not_dir_80 = sub_uint_uv(1, dir80);
+    let dir60 = cmp60 *. not_dir_80; // 1 if dot60 is maximum
+    let not_dir_60_80 = sub_uv(not_dir_80, dir60);
+    let dir40 = cmp40 *. not_dir_60_80; // 1 if dot40 is maximum
+    let not_dir_40_60_80 = sub_uv(not_dir_60_80, dir40);
+    let dir20 = cmp20 *. not_dir_40_60_80; // 1 if dot20 is maximum
+    let not_dir_20_40_60_80 = sub_uv(not_dir_40_60_80, dir20);
+    let dir00 = not_dir_20_40_60_80; // 1 if dot0 is maximum
+    // using nonneg_grad0 and nonneg_grad1, change the direction from the first quadrant to the correct quadrant
+    // nonneg_grad0 = 1, nonneg_grad1 = 1 => 1st quadrant, dir 0-4 (0-90 degrees)
+    // nonneg_grad0 = 0, nonneg_grad1 = 1 => 2nd quadrant, dir 5-9 (90-180 degrees)
+    // nonneg_grad0 = 0, nonneg_grad1 = 0 => 3rd quadrant, dir 9-13 (180-270 degrees)
+    // nonneg_grad0 = 1, nonneg_grad1 = 0 => 4th quadrant, dir 14-18(0) (270-360 degrees)
+    // directions 0 and 9 are in two quadrants
+    let neg_grad0 = sub_uint_uv(1, nonneg_grad0);
+    let neg_grad1 = sub_uint_uv(1, nonneg_grad1);
+    let quad1 : arr[Int] = nonneg_grad0 *. nonneg_grad1; // 1 if 1st quadrant
+    let quad2 : arr[Int] = neg_grad0 *. nonneg_grad1;
+    // If the gradient is exactly between quadrants 3 and 4 (i.e. grad0 = 0 and grad1 < 0),
+    // assign it to quadrant 3 as in dlib:
+    let nonpos_grad0 = is_nonnegative_uv(mul_preuint_uv(-1, grad0), 9);
+    let pos_grad0 = sub_uint_uv(1, nonpos_grad0);
+    let quad3 : arr[Int] = nonpos_grad0 *. neg_grad1;
+    let quad4 : arr[Int] = pos_grad0 *. neg_grad1;
+    // The following two lines would assign it to quadrant 4:
+    //let quad3 : arr[Int] = neg_grad0 *. neg_grad1;
+    //let quad4 : arr[Int] = nonneg_grad0 *. neg_grad1;
+    let dir0 : arr[Int] = nonneg_grad0 *. dir00;
+    let dir1 : arr[Int] = quad1 *. dir20;
+    let dir2 : arr[Int] = quad1 *. dir40;
+    let dir3 : arr[Int] = quad1 *. dir60;
+    let dir4 : arr[Int] = quad1 *. dir80;
+    let dir5 : arr[Int] = quad2 *. dir80;
+    let dir6 : arr[Int] = quad2 *. dir60;
+    let dir7 : arr[Int] = quad2 *. dir40;
+    let dir8 : arr[Int] = quad2 *. dir20;
+    let dir9 : arr[Int] = neg_grad0 *. dir00;
+    let dir10 : arr[Int] = quad3 *. dir20;
+    let dir11 : arr[Int] = quad3 *. dir40;
+    let dir12 : arr[Int] = quad3 *. dir60;
+    let dir13 : arr[Int] = quad3 *. dir80;
+    let dir14 : arr[Int] = quad4 *. dir80;
+    let dir15 : arr[Int] = quad4 *. dir60;
+    let dir16 : arr[Int] = quad4 *. dir40;
+    let dir17 : arr[Int] = quad4 *. dir20;
+    let dirs : list[arr[Int]] = [dir0, dir1, dir2, dir3, dir4, dir5, dir6, dir7, dir8, dir9, dir10, dir11, dir12, dir13, dir14, dir15, dir16, dir17];
+    // length of the gradient vector
+    let sq_grad0 : arr[Int] = grad0 *. grad0; // 16-bit unsigned
+    let sq_grad1 : arr[Int] = grad1 *. grad1;
+    let sqlen_grad : arr[Int] = sq_grad0 +. sq_grad1; // 17-bit unsigned
+    let sqlen_grad = uv_to_fv_unchecked(sqlen_grad, 18 + 9, 9);
+    dbg_print("sqrt" : string $pre @public);
+    // sqlen_grad has 17 bits (unsigned) before the point, so its square root has 9
+    // we keep the extra 8 bits because 4*64 such numbers will be added together later, using exactly those 8 bits
+    let len_grad = sqrt_fv(sqlen_grad);
+    dbg_print("sqrt: end" : string $pre @public);
+    let dirs_lg : list[FixedVec[N]] =
+        for i in 0 .. 18 {
+            mul_uv_fv_unchecked(dirs[i], len_grad)
+        };
+    let hist00_mult : list[list[Fixed[N, $pre, @public]]] =
+        for i in 0 .. cell_size {
+            let i = i as uint[N];
+            for j in 0 .. cell_size {
+                let j = j as uint[N];
+                Fixed {
+                    coef : (15 - 2*i) * (15 - 2*j),
+                    len : 8,
+                    pplen : 8
+                }
+            }
+        };
+    let hist01_mult =
+        for i in 0 .. cell_size {
+            let i = i as uint[N];
+            for j in 0 .. cell_size {
+                let j = j as uint[N];
+                Fixed {
+                    coef : (15 - 2*i) * (1 + 2*j),
+                    len : 8,
+                    pplen : 8
+                }
+            }
+        };
+    let hist10_mult =
+        for i in 0 .. cell_size {
+            let i = i as uint[N];
+            for j in 0 .. cell_size {
+                let j = j as uint[N];
+                Fixed {
+                    coef : (1 + 2*i) * (15 - 2*j),
+                    len : 8,
+                    pplen : 8
+                }
+            }
+        };
+    let hist11_mult =
+        for i in 0 .. cell_size {
+            let i = i as uint[N];
+            for j in 0 .. cell_size {
+                let j = j as uint[N];
+                Fixed {
+                    coef : (1 + 2*i) * (1 + 2*j),
+                    len : 8,
+                    pplen : 8
+                }
+            }
+        };
+    let hist00 =
+        for d in 0 .. 18 {
+            let dlg = dirs_lg[d];
+            let mut h = FixedVec { coefs : freeze([]), len : 0, pplen : 0 };
+            for i in 0 .. cell_size {
+                for j in 0 .. cell_size {
+                    let k = i * cell_size + j;
+                    let xv = mul_prefixed_fv_exact(hist00_mult[i][j], slice_fv(dlg, k * num_cells, (k+1) * num_cells));
+                    if (length(h.coefs) == 0) {
+                        h = xv;
+                    } else {
+                        h = add_fv_unchecked(h, xv);
+                    }
+                }
+                {}
+            }
+            h
+        };
+    let hist01 =
+        for d in 0 .. 18 {
+            let dlg = dirs_lg[d];
+            let mut h = FixedVec { coefs : freeze([]), len : 0, pplen : 0 };
+            for i in 0 .. cell_size {
+                for j in 0 .. cell_size {
+                    let k = i * cell_size + j;
+                    let xv = mul_prefixed_fv_exact(hist01_mult[i][j], slice_fv(dlg, k * num_cells, (k+1) * num_cells));
+                    if (length(h.coefs) == 0) {
+                        h = xv;
+                    } else {
+                        h = add_fv_unchecked(h, xv);
+                    }
+                }
+                {}
+            }
+            h
+        };
+    let hist10 =
+        for d in 0 .. 18 {
+            let dlg = dirs_lg[d];
+            let mut h = FixedVec { coefs : freeze([]), len : 0, pplen : 0 };
+            for i in 0 .. cell_size {
+                for j in 0 .. cell_size {
+                    let k = i * cell_size + j;
+                    let xv = mul_prefixed_fv_exact(hist10_mult[i][j], slice_fv(dlg, k * num_cells, (k+1) * num_cells));
+                    if (length(h.coefs) == 0) {
+                        h = xv;
+                    } else {
+                        h = add_fv_unchecked(h, xv);
+                    }
+                }
+                {}
+            }
+            h
+        };
+    let hist11 =
+        for d in 0 .. 18 {
+            let dlg = dirs_lg[d];
+            let mut h = FixedVec { coefs : freeze([]), len : 0, pplen : 0 };
+            for i in 0 .. cell_size {
+                for j in 0 .. cell_size {
+                    let k = i * cell_size + j;
+                    let xv = mul_prefixed_fv_exact(hist11_mult[i][j], slice_fv(dlg, k * num_cells, (k+1) * num_cells));
+                    if (length(h.coefs) == 0) {
+                        h = xv;
+                    } else {
+                        h = add_fv_unchecked(h, xv);
+                    }
+                }
+                {}
+            }
+            h
+        };
+    // hist has cells_nr-1 rows, cells_nc-1 columns, row stride cells_nc
+    let hist =
+        for d in 0 .. 18 {
+            add_fv_unchecked(
+                add_fv_unchecked(slice_fv(hist00[d], cells_nc + 1, num_cells), slice_fv(hist01[d], cells_nc, num_cells - 1)),
+                add_fv_unchecked(slice_fv(hist10[d], 1, num_cells - cells_nc), slice_fv(hist11[d], 0, num_cells - cells_nc - 1)))
+        };
+    let hog_nr = cells_nr - 3;
+    let hog_nc = cells_nc - 3;
+    dbg_print("hist" : string $pre @public);
+    let mut norm = FixedVec { coefs : freeze([]), len : 0, pplen : 0 };
+    for d in 0 .. 9 {
+        let xv = add_fv_exact(hist[d], hist[d + 9]);
+        let xv = mul_fv_exact(xv, xv);
+        if (length(norm.coefs) == 0) {
+            norm = xv;
+        } else {
+            norm = add_fv_unchecked(norm, xv);
+        }
+    }
+    let norm = FixedVec { coefs : norm.coefs, len : norm.len + 4, pplen : norm.pplen };
+
+    // norm2 has cells_nr-2 rows, cells_nc-2 columns, row stride cells_nc
+    dbg_print("norm2" : string $pre @public);
+    let norm2 =
+        add_fv_exact(
+            add_fv_exact(slice_fv(norm, 0, length(norm.coefs) - cells_nc - 1), slice_fv(norm, 1, length(norm.coefs) - cells_nc)),
+            add_fv_exact(slice_fv(norm, cells_nc, length(norm.coefs) - 1), slice_fv(norm, cells_nc + 1, length(norm.coefs))));
+    let eps = div_fixed(uint_to_fixed(1, norm2.len, norm2.pplen), uint_to_fixed(10000, norm2.len, norm2.pplen)); // 0.0001
+    let norm3 = add_prefixed_fv_unchecked(eps, norm2);
+    let norm4 = increase_pplen_fv(decrease_len_fv_unchecked(sqrt_fv(round_down_fv(norm3, 52, 17)), 35), 35);
+
+    let half = Fixed { coef : pow_pre(2, norm4.pplen - 1), len : norm4.len, pplen : norm4.pplen }; // 0.5
+    let norm_n = div_fixed_fv(half, norm4);
+    let norm_n = decrease_len_fv_unchecked(norm_n, norm_n.pplen + 7); // norm_n cannot be more than 50, due to eps
+    let norm_n1 = slice_fv(norm_n, 0, (hog_nr - 1) * cells_nc + hog_nc);
+    let norm_n2 = slice_fv(norm_n, 1, (hog_nr - 1) * cells_nc + hog_nc + 1);
+    let norm_n3 = slice_fv(norm_n, cells_nc, hog_nr * cells_nc + hog_nc);
+    let norm_n4 = slice_fv(norm_n, cells_nc + 1, hog_nr * cells_nc + hog_nc + 1);
+    let hist_slices =
+        for d in 0 .. 27 {
+            if (d < 18) {
+                slice_fv(hist[d], cells_nc + 1, hog_nr * cells_nc + hog_nc + 1)
+            } else {
+                let d = d - 18;
+                let s1 = slice_fv(hist[d], cells_nc + 1, hog_nr * cells_nc + hog_nc + 1);
+                let s2 = slice_fv(hist[d + 9], cells_nc + 1, hog_nr * cells_nc + hog_nc + 1);
+                add_fv_exact(s1, s2)
+            }
+        };
+    let mut t1 = FixedVec { coefs : freeze([]), len : 0, pplen : 0 };
+    let mut t2 = FixedVec { coefs : freeze([]), len : 0, pplen : 0 };
+    let mut t3 = FixedVec { coefs : freeze([]), len : 0, pplen : 0 };
+    let mut t4 = FixedVec { coefs : freeze([]), len : 0, pplen : 0 };
+    let d27 = Fixed { coef : 7908780, len : 25, pplen : 24 }; // 2*0.2357
+    let hog_pplen = 35;
+    let hog_len = hog_pplen + 1;
+    // hog[d] has hog_nr rows, hog_nc columns, row stride cells_nc
+    let hog =
+        for d in 0 .. 31 {
+            if (d < 27) {
+                let h0 = hist_slices[d];
+                let h1 = mul_fv_exact(h0, norm_n1);
+                let h2 = mul_fv_exact(h0, norm_n2);
+                let h3 = mul_fv_exact(h0, norm_n3);
+                let h4 = mul_fv_exact(h0, norm_n4);
+                let one_tenth = Fixed { coef : (wire { pow_pre(2 : uint[N] $pre @public, h1.pplen) / 10 }) as @prover, len : h1.len, pplen : h1.pplen }; // 0.1
+                let h1 = min_fixed_fv(one_tenth, h1);
+                let h2 = min_fixed_fv(one_tenth, h2);
+                let h3 = min_fixed_fv(one_tenth, h3);
+                let h4 = min_fixed_fv(one_tenth, h4);
+                let h = add_fv_exact(add_fv_exact(h1, h2), add_fv_exact(h3, h4));
+                let h = decrease_len_fv_unchecked(h, h.pplen + 1); // h is between 0 and 0.4
+                let h = round_down_fv(h, hog_len, hog_pplen);
+                if (d == 0) {
+                    t1 = h1;
+                    t2 = h2;
+                    t3 = h3;
+                    t4 = h4;
+                } else if (d < 18) {
+                    t1 = add_fv_unchecked(t1, h1);
+                    t2 = add_fv_unchecked(t2, h2);
+                    t3 = add_fv_unchecked(t3, h3);
+                    t4 = add_fv_unchecked(t4, h4);
+                }
+                h
+            } else if (d == 27) {
+                round_down_fv(mul_fixed_fv_exact(d27, t4), hog_len, hog_pplen) // between 0 and 0.84852
+            } else if (d == 28) {
+                round_down_fv(mul_fixed_fv_exact(d27, t2), hog_len, hog_pplen)
+            } else if (d == 29) {
+                round_down_fv(mul_fixed_fv_exact(d27, t3), hog_len, hog_pplen)
+            } else {
+                round_down_fv(mul_fixed_fv_exact(d27, t1), hog_len, hog_pplen)
+            }
+        };
+    dbg_print("create_hog: end" : string $pre @public);
+    // remove the unnecessary values between rows
+    for d in 0 .. 31 {
+        let h = hog[d];
+        for i in 0 .. hog_nr {
+            slice_fv(h, i * cells_nc, i * cells_nc + hog_nc)
+        }
+    }
+}
+
+pub struct FaceLocator {
+    filter_hog_idx : list[list[u64 $pre @public]],
+    threshold : list[Fixed[N, $post, @prover]],
+    row_filters : list[list[list[Fixed[N, $post, @prover]]]],
+    col_filters : list[list[list[Fixed[N, $post, @prover]]]]
+}
+
+pub fn init_face_locator() -> FaceLocator where Field[N] {
+    let filter_hog_idx = get_public("filter_hog_idx");
+    let threshold_pre : list[uint[N] $pre @verifier] $pre @verifier = get_instance("detection_threshold");
+    let row_filters_pre : list[list[list[uint[N] $pre @verifier] $pre @verifier] $pre @verifier] $pre @verifier = get_instance("row_filters");
+    let col_filters_pre : list[list[list[uint[N] $pre @verifier] $pre @verifier] $pre @verifier] $pre @verifier = get_instance("col_filters");
+    let pplen = 35;
+    let len = pplen + 1;
+    let filter_size = 10;
+    let threshold =
+        for i in 0 .. length(filter_hog_idx) {
+            fixed_prover(fixed_post(fixed(threshold_pre[i as @verifier], pplen + 17, pplen)))
+        };
+    let row_filters =
+        for i in 0 .. length(filter_hog_idx) {
+            for j in 0 .. length(filter_hog_idx[i]) {
+                for k in 0 .. filter_size {
+                    fixed_prover(fixed_post(fixed(row_filters_pre[i as @verifier][j as @verifier][k as @verifier], len, pplen)))
+                }
+            }
+        };
+    let col_filters =
+        for i in 0 .. length(filter_hog_idx) {
+            for j in 0 .. length(filter_hog_idx[i]) {
+                for k in 0 .. filter_size {
+                    fixed_prover(fixed_post(fixed(col_filters_pre[i as @verifier][j as @verifier][k as @verifier], len, pplen)))
+                }
+            }
+        };
+    FaceLocator {
+        filter_hog_idx : filter_hog_idx,
+        threshold : threshold,
+        row_filters : row_filters,
+        col_filters : col_filters
+    }
+}
+
+fn apply_row_filter(h : FixedVec[N], nr : u64 $pre @public, nc : u64 $pre @public, filter : list[Fixed[N, $post, @prover]]) -> FixedVec[N] where Vectorization {
+    let mut r : FixedVec[N] = empty_fv();
+    let n = length(h.coefs) - length(filter) + 1;
+    for i in 0 .. length(filter) {
+        let y = mul_fixed_fv_exact(filter[i], slice_fv(h, i, n + i));
+        if (i == 0) {
+            r = y;
+        } else {
+            r = add_fv_unchecked(r, y);
+        }
+    }
+    let nc' = nc - length(filter) + 1;
+    // r has nr rows, nc' columns, row stride nc
+    // remove the unnecessary values between rows
+    let mut coefs : list[uint[N] $post @prover] = [];
+    for i in 0 .. nr {
+        for j in 0 .. nc' {
+            list_push(ref coefs, r.coefs[i * nc + j]);
+        }
+        {}
+    }
+    fv_unchecked(freeze(coefs), r.len + 4, r.pplen)
+}
+
+fn apply_col_filter(h : FixedVec[N], nr : u64 $pre @public, nc : u64 $pre @public, filter : list[Fixed[N, $post, @prover]]) -> FixedVec[N] where Vectorization {
+    let mut r : FixedVec[N] = empty_fv();
+    let n = length(h.coefs) - nc * (length(filter) - 1);
+    for i in 0 .. length(filter) {
+        let y = mul_fixed_fv_exact(filter[i], slice_fv(h, i * nc, n + i * nc));
+        if (i == 0) {
+            r = y;
+        } else {
+            r = add_fv_unchecked(r, y);
+        }
+    }
+    fv_unchecked(r.coefs, r.len + 3, r.pplen)
+}
+
+struct FilteringResult {
+    nr : u64 $pre @public,
+    nc : u64 $pre @public,
+    detection : arr[uint[N] $post @prover],
+    confidence : FixedVec[N]
+}
+
+fn apply_hog_filters(fl : FaceLocator, hog : list[list[FixedVec[N]]]) -> FilteringResult where Field[N], Vectorization {
+    dbg_print("apply_hog_filters: start" : string $pre @public);
+    let padding1 = 4; // left and top padding
+    let padding2 = 5; // right and bottom padding
+    let padding = padding1 + padding2;
+    let hog_nd = length(hog);
+    let hog_nr = length(hog[0]) + padding;
+    let hog_nc = length(hog[0][0].coefs) + padding;
+    let padding2_start_row = hog_nr - padding2;
+    let padding2_start_col = hog_nc - padding2;
+    let len = hog[0][0].len;
+    let pplen = hog[0][0].pplen;
+    // add padding
+    let hog =
+        for d in 0 .. hog_nd {
+            let mut hog_flattened : list[uint[N] $post @prover] = [];
+            for i in 0 .. hog_nr {
+                for j in 0 .. hog_nc {
+                    if (i < padding1 | i >= padding2_start_row | j < padding1 | j >= padding2_start_col) {
+                        list_push(ref hog_flattened, 0);
+                    } else {
+                        list_push(ref hog_flattened, hog[d][i - padding1].coefs[j - padding1]);
+                    }
+                }
+                {}
+            }
+            fv_unchecked(freeze(hog_flattened), len, pplen)
+        };
+
+    let mut res_detection : arr[uint[N] $post @prover] = freeze([]);
+    let mut res_confidence : FixedVec[N] = empty_fv();
+    for i in 0 .. length(fl.filter_hog_idx) {
+        let mut sum_filters = empty_fv();
+        for j in 0 .. length(fl.filter_hog_idx[i]) {
+            let hog_idx = fl.filter_hog_idx[i][j];
+            let after_row_filter = apply_row_filter(hog[hog_idx], hog_nr, hog_nc, fl.row_filters[i][j]);
+            let after_col_filter = apply_col_filter(after_row_filter, hog_nr, hog_nc - 9, fl.col_filters[i][j]);
+            if (j == 0) {
+                sum_filters = after_col_filter;
+            } else {
+                sum_filters = add_fv_unchecked(sum_filters, after_col_filter);
+            }
+        }
+        sum_filters = fv_unchecked(sum_filters.coefs, sum_filters.len + 7, sum_filters.pplen);
+        let thresh = fl.threshold[i];
+        sum_filters = round_down_fv(sum_filters, thresh.len, thresh.pplen);
+        dbg_print("sum_filters" : string $pre @public);
+        let detection = ge_fv_fixed(sum_filters, thresh);
+        dbg_print("detection" : string $pre @public);
+        let confidence = mul_uv_fv_unchecked(detection, add_fixed_fv_unchecked(negate_fixed(thresh), sum_filters));
+        dbg_print("confidence" : string $pre @public);
+        if (i == 0) {
+            res_detection = detection;
+            res_confidence = confidence;
+        } else {
+            res_detection = sub_uv(res_detection +. detection, res_detection *. detection);
+            res_confidence = max_fv(res_confidence, confidence);
+        }
+        {}
+    }
+    dbg_print("res_detection" : string $pre @public);
+    let nr = hog_nr - 9;
+    let nc = hog_nc - 9;
+    for i in 0 .. nr {
+        let mut s : string $pre @prover = "";
+        for j in 0 .. nc {
+            let k = i * nc + j;
+            s = string_append(s, string_append(" ", to_string(res_detection[k] as $pre)));
+        }
+        dbg_print(s);
+    }
+    dbg_print("res_confidence" : string $pre @public);
+    let t = thaw_fv(res_confidence);
+    for i in 0 .. nr {
+        let mut s : string $pre @prover = "";
+        for j in 0 .. nc {
+            let k = i * nc + j;
+            s = string_append(s, string_append(" ", fixed_to_string_2(t[k], 6)));
+        }
+        dbg_print(s);
+    }
+    dbg_print("apply_hog_filters: end" : string $pre @public);
+    FilteringResult {
+        nr : nr,
+        nc : nc,
+        detection : res_detection,
+        confidence : res_confidence
+    }
+}
+
+pub struct LocationResult {
+    top_row : Int,
+    bottom_row : Int,
+    left_col : Int,
+    right_col : Int,
+    face_found : bool $pre @prover,
+    confidence : Fixed[N, $post, @prover]
+}
+
+// Returns an n-element vector whose kth element is 1 an the rest are 0.
+// It checks that there is one 1 and the rest are 0
+// but because k is $pre, it cannot check that the 1 is at the kth place.
+fn index_to_bit_vector(k : u64 $pre @prover, n : u64 $pre @public) -> arr[uint[N] $post @prover] where Field[N], Vectorization {
+    let res =
+        array_to_post(
+            freeze(
+                for i in 0 .. n {
+                    (i as @prover == k) as bool as bool[N] as uint[N]
+                }));
+
+    let unknown_res = make_unknown(res);
+    check_bit_uv(unknown_res);
+    assert_zero(sum_uv(unknown_res) - 1); // check that exactly one element is 1
+    res
+}
+
+fn choose_best_face_location_overall(lrs : list[LocationResult]) -> LocationResult where Field[N], Vectorization {
+    dbg_print("choose_best_face_location_overall" : string $pre @public);
+    let n = length(lrs);
+    let mut best_i : u64 $pre @prover = 0;
+    let mut best_conf_pre : uint[N] $pre @prover = 0;
+    let mut face_found : bool $pre @prover = false;
+    for i in 0 .. n {
+        let lr = lrs[i];
+        if (lr.face_found) {
+            face_found = true;
+            let conf = lr.confidence.coef as $pre;
+            if (conf > best_conf_pre) {
+                best_i = i as @prover;
+                best_conf_pre = conf;
+            }
+        }
+    }
+    dbg_print(to_string(best_i));
+    dbg_print("face found = " ++ to_string(face_found));
+    let is_best = index_to_bit_vector(best_i, n);
+    let mut top_row = 0;
+    let mut bottom_row = 0;
+    let mut left_col = 0;
+    let mut right_col = 0;
+    let mut conf = 0;
+    for i in 0 .. n {
+        let d = is_best[i];
+        let lr = lrs[i];
+        top_row = top_row + lr.top_row * d;
+        bottom_row = bottom_row + lr.bottom_row * d;
+        left_col = left_col + lr.left_col * d;
+        right_col = right_col + lr.right_col * d;
+        conf = conf + lr.confidence.coef * d;
+    }
+    let best_conf = Fixed { coef : conf, len : lrs[0].confidence.len, pplen : lrs[0].confidence.pplen };
+    // check that the element set to 1 by prover in is_best really has the best confidence
+    for i in 0 .. n {
+        assert(le_fixed(lrs[i].confidence, best_conf));
+    }
+    dbg_print("original image coordinates of the overall best face location:" : string $pre @public);
+    dbg_print("top row = " ++ to_string(signed_uintN_to_uint(top_row as $pre)));
+    dbg_print("left col = " ++ to_string(signed_uintN_to_uint(left_col as $pre)));
+    dbg_print("bottom row = " ++ to_string(bottom_row as $pre));
+    dbg_print("right col = " ++ to_string(right_col as $pre));
+    dbg_print("confidence = " ++ fixed_to_string_2(best_conf, 6));
+    LocationResult {
+        top_row : top_row,
+        bottom_row : bottom_row,
+        left_col : left_col,
+        right_col : right_col,
+        face_found : face_found,
+        confidence : best_conf
+    }
+}
+
+fn choose_best_face_location(fr : FilteringResult, scaling_factor : Fixed[N, $post, @prover]) -> LocationResult where Field[N], Vectorization {
+    let n = length(fr.detection);
+    dbg_assert(fr.nr * fr.nc == n);
+    let mut best_i : u64 $pre @prover = 0;
+    let mut best_conf_pre : uint[N] $pre @prover = 0;
+    let mut face_found : bool $pre @prover = false;
+    for i in 0 .. n {
+        if (fr.detection[i] as $pre == 1) {
+            face_found = true;
+            let conf = fr.confidence.coefs[i] as $pre;
+            if (conf > best_conf_pre) {
+                best_i = i as @prover;
+                best_conf_pre = conf;
+            }
+        }
+    }
+    //dbg_print(to_string(best_i));
+    dbg_print("face found = " ++ to_string(face_found));
+
+    // like fr.detection but only one element remains 1, the rest are changed to 0
+    // if face_found == false, then the first element (top left corner) is 1
+    let best_det = index_to_bit_vector(best_i, n);
+
+    let best_conf = scalar_prod_uv_fv_unchecked(best_det, fr.confidence);
+    assert_one_uv(le_fv_fixed(fr.confidence, best_conf)); // check that the element set to 1 by prover really has the best confidence
+
+    let mut row = 0;
+    let mut col = 0;
+    for i in 0 .. fr.nr {
+        for j in 0 .. fr.nc {
+            let d = best_det[i * fr.nc + j];
+            row = row + ((wire{i as uint[N]}) as @prover) * d;
+            col = col + ((wire{j as uint[N]}) as @prover) * d;
+        }
+        {}
+    }
+    dbg_print("cell coordinates of the best face location:" : string $pre @public);
+    dbg_print("row = " ++ to_string(row as $pre));
+    dbg_print("col = " ++ to_string(col as $pre));
+    let c1 = 12;
+    let c2 = 36;
+    let center_row = c1 + 8 * row;
+    let center_col = c1 + 8 * col;
+    let top_row = center_row - c2;
+    let bottom_row = center_row + c2;
+    let left_col = center_col - c2;
+    let right_col = center_col + c2;
+    dbg_print("downscaled image coordinates of the best face location:" : string $pre @public);
+    dbg_print("top row = " ++ to_string(signed_uintN_to_uint(top_row as $pre)));
+    dbg_print("left col = " ++ to_string(signed_uintN_to_uint(left_col as $pre)));
+    dbg_print("bottom row = " ++ to_string(bottom_row as $pre));
+    dbg_print("right col = " ++ to_string(right_col as $pre));
+    dbg_print("confidence = " ++ fixed_to_string_2(best_conf, 6));
+    let scale_up = fn (x : Int) {
+        let x' = uint_to_fixed(x, 14, 0);
+        round_fixed_to_nearest_int(mult_fixed_exact(x', scaling_factor))
+    };
+    let top_row = scale_up(top_row);
+    let bottom_row = scale_up(bottom_row);
+    let left_col = scale_up(left_col);
+    let right_col = scale_up(right_col);
+    dbg_print("original image coordinates of the best face location:" : string $pre @public);
+    dbg_print("top row = " ++ to_string(signed_uintN_to_uint(top_row as $pre)));
+    dbg_print("left col = " ++ to_string(signed_uintN_to_uint(left_col as $pre)));
+    dbg_print("bottom row = " ++ to_string(bottom_row as $pre));
+    dbg_print("right col = " ++ to_string(right_col as $pre));
+    LocationResult {
+        top_row : top_row,
+        bottom_row : bottom_row,
+        left_col : left_col,
+        right_col : right_col,
+        face_found : face_found,
+        confidence : best_conf
+    }
+}
+
+fn scale_down_length(n : u64 $pre @public) -> u64 $pre @public {
+    (n - 1) * 5 / 6 + 1
+}
+
+// reduce the number of rows by a factor or 6/5
+// the pixel values are interpolated but multiplied by 5 so that they remain integers
+fn scale_down_helper(img : list[list[Int]]) -> list[list[Int]] where Field[N] {
+    let nr1 = length(img);
+    let nr2 = scale_down_length(nr1);
+    let nc = length(img[0]);
+    for i in 0 .. nr2 {
+        let top = i * 6 / 5;
+        let top_row = img[top];
+        let bottom_coef = i % 5;
+        if (bottom_coef == 0) {
+            for j in 0 .. nc {
+                5 * top_row[j]
+            }
+        } else {
+            let bottom_row = img[top + 1];
+            let top_coef = 5 - bottom_coef;
+            let bottom_coef = (wire{bottom_coef as uint[N]}) as @prover;
+            let top_coef = (wire{top_coef as uint[N]}) as @prover;
+            for j in 0 .. nc {
+                top_coef * top_row[j] + bottom_coef * bottom_row[j]
+            }
+        }
+    }
+}
+
+fn transpose(img : list[list[Int]]) -> list[list[Int]] {
+    let nr = length(img);
+    let nc = length(img[0]);
+    for i in 0 .. nc {
+        for j in 0 .. nr {
+            img[j][i]
+        }
+    }
+}
+
+fn flatten_img(img : list[list[Int]]) -> arr[Int] where Vectorization {
+    let nr = length(img);
+    let nc = length(img[0]);
+    let mut res : list[Int] = [];
+    for i in 0 .. nr {
+        for j in 0 .. nc {
+            list_push(ref res, img[i][j]);
+        }
+        {}
+    }
+    freeze(res)
+}
+
+pub fn unflatten_img(nr : u64 $pre @public, nc : u64 $pre @public, img : arr[Int]) -> list[list[Int]] {
+    for i in 0 .. nr {
+        for j in 0 .. nc {
+            img[i * nc + j]
+        }
+    }
+}
+
+// scales the image down by a factor of 6/5, i.e. 1.2
+fn scale_down(img : list[list[Int]]) -> list[list[Int]] where Field[N], Vectorization {
+    // to achieve bilinear interpolation, we interpolate rows and columns separately
+    // first reduce the number of rows
+    let img = scale_down_helper(img);
+    // then reduce the number of columns
+    let img = transpose(scale_down_helper(transpose(img)));
+    // divide by 25 because each scale_down_helper multiplied by 5
+    let nr = length(img);
+    let nc = length(img[0]);
+    let img = fv_unchecked(flatten_img(img), 14, 0); // each coef is at most 25*255
+    let one_25th = Fixed { coef : 20972, len : 20, pplen : 19 }; // 1/25, rounded up slightly
+    let img = mul_fixed_fv_exact(one_25th, img);
+    let img = round_down_fv_to_int(img);
+    let img = unflatten_img(nr, nc, img);
+    img
+}
+
+// check that the best face location (lr) overlaps with the face locations in fr enough that they can be considered to be the same face
+// two rectangles (which are here almost squares) are considered to overlap enough if the center of the smaller square is inside the larger square
+fn check_for_overlap(lr : LocationResult, fr : FilteringResult, scaling_factor : Fixed[N, $post, @prover]) where Field[N], Vectorization {
+    dbg_print("check_for_overlap" : string $pre @public);
+    let scaling_factor = increase_len_fixed(scaling_factor, scaling_factor.len + 10);
+    let twelve = uint_to_fixed(12, scaling_factor.len, scaling_factor.pplen);
+    let eight = uint_to_fixed(8, scaling_factor.len, scaling_factor.pplen);
+    let two = uint_to_fixed(2, scaling_factor.len, scaling_factor.pplen);
+    let nine = uint_to_fixed(9, scaling_factor.len, scaling_factor.pplen);
+    let four_and_half = div_fixed(nine, two);
+    let scale_down = fn (x : Int) {
+        let x' = uint_to_fixed(x, scaling_factor.len, scaling_factor.pplen);
+        div_fixed(sub_fixed(div_fixed(x', scaling_factor), twelve), eight)
+    };
+    dbg_print("scaling_factor = " ++ fixed_to_string_2(scaling_factor, 6));
+    let top_row = scale_down(lr.top_row);
+    let bottom_row = scale_down(lr.bottom_row);
+    let left_col = scale_down(lr.left_col);
+    let right_col = scale_down(lr.right_col);
+    let center_row = div_fixed(add_fixed(top_row, bottom_row), two);
+    let center_col = div_fixed(add_fixed(left_col, right_col), two);
+    // square with the same center but height and width 9
+    let top_row2 = sub_fixed(center_row, four_and_half);
+    let left_col2 = sub_fixed(center_col, four_and_half);
+    let bottom_row2 = add_fixed(center_row, four_and_half);
+    let right_col2 = add_fixed(center_col, four_and_half);
+    // increase height and width to at least 9
+    let top_row = min_fixed(top_row, top_row2);
+    let left_col = min_fixed(left_col, left_col2);
+    let bottom_row = max_fixed(bottom_row, bottom_row2);
+    let right_col = max_fixed(right_col, right_col2);
+    let top_row = round_up_fixed_to_int(top_row);
+    let left_col = round_up_fixed_to_int(left_col);
+    let bottom_row = round_down_fixed_to_int(bottom_row);
+    let right_col = round_down_fixed_to_int(right_col);
+    // construct the matrix that has 0s inside this rectangle and 1s outside
+    let mut rows : list[Int] = [];
+    let mut cols : list[Int] = [];
+    for i in 0 .. fr.nr {
+        for j in 0 .. fr.nc {
+            list_push(ref rows, (wire{i as uint[N]}) as @prover);
+            list_push(ref cols, (wire{j as uint[N]}) as @prover);
+        }
+        {}
+    }
+    let rows = freeze(rows);
+    let cols = freeze(cols);
+    let len = scaling_factor.len - scaling_factor.pplen;
+    let is_inside_rows : arr[Int] = ge_uv_uint(rows, top_row, len) *. le_uv_uint(rows, bottom_row, len);
+    let is_inside_cols : arr[Int] = ge_uv_uint(cols, left_col, len) *. le_uv_uint(cols, right_col, len);
+    let is_inside : arr[Int] = is_inside_rows *. is_inside_cols;
+    let is_outside = sub_uint_uv(1, is_inside);
+    // assert that no faces were detected outside the rectangle
+    let faces_outside = scalar_prod_uv(is_outside, fr.detection);
+    dbg_print("number of face locations that do not overlap with the best location rectangle: " ++ to_string(faces_outside as $pre));
+    assert_zero(faces_outside);
+}
+
+pub fn apply_face_locator(face_locator : FaceLocator, image : list[list[Int]]) -> LocationResult where Field[N], Vectorization {
+    dbg_print("apply_face_locator: start" : string $pre @public);
+    let num_rows = length(image);
+    let num_cols = length(image[0]);
+    let mut min_len = min_pre(num_rows, num_cols);
+    let scaling_factor1 : Fixed[N, $post, @prover] = Fixed { coef : 629146, len : 28, pplen : 19 }; // 1.2
+    let mut scaling_factor = uint_to_fixed(1, scaling_factor1.len, scaling_factor1.pplen);
+
+    let mut image = image;
+    let mut location_results : list[LocationResult] = [];
+    let mut filtering_results : list[FilteringResult] = [];
+    let mut scaling_factors : list[Fixed[N, $post, @prover]] = [];
+    for level in 0 : u64 $pre @public .. 25 { // 25 levels allows up to about 6000x6000 pixel images
+        dbg_print("level " ++ to_string(level));
+        dbg_print("min_len = " ++ to_string(min_len));
+        dbg_print("scaling_factor = " ++ fixed_to_string_2(scaling_factor, 6));
+
+        let hog = create_hog(image);
+
+        let filtering_result = apply_hog_filters(face_locator, hog);
+        list_push(ref filtering_results, filtering_result);
+
+        let location_result = choose_best_face_location(filtering_result, scaling_factor);
+        list_push(ref location_results, location_result);
+        list_push(ref scaling_factors, scaling_factor);
+
+        min_len = scale_down_length(min_len);
+        if (min_len < 64) {
+            break;
+        }
+        image = scale_down(image);
+        scaling_factor = mult_fixed(scaling_factor1, scaling_factor);
+    }
+    let best_location_result = choose_best_face_location_overall(location_results);
+
+    // check that there is only one face on the image
+    for i in 0 .. length(filtering_results) {
+        check_for_overlap(best_location_result, filtering_results[i], scaling_factors[i]);
+    }
+    dbg_print("apply_face_locator: end" : string $pre @public);
+    best_location_result
+}

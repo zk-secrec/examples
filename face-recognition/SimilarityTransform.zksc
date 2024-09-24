@@ -1,0 +1,293 @@
+use FastFixedPoint::*;
+use Integer::*;
+use Std::*;
+
+type N : Nat = 170141183460469231731687303715884105727; // 2^127-1
+
+type Num : Unqualified = Fixed[N, $post, @prover];
+type Coef : Qualified = uint[N] $post @prover; // signed fixed-point number with last fixed_pplen() bits after the point
+
+// We use higher fixed_len() and fixed_pplen() here than in FaceAlignment.zksc and resnet.zksc, as here we need more precision.
+// The code in this file is not a performance bottleneck, so here we check for overflow after each operation, so we can use the maximum possible fixed_len().
+// The code in FaceAlignment.zksc and resnet.zksc is performance-critical,
+// so there we need to allow several additions/subtractions (in addition to at most one multiplication) before checking for overflow,
+// thus we need lower fixed_len() there to avoid overflowing the modulus before checking for overflowing fixed_len().
+fn fixed_len() -> u64 $pre @public {
+    63
+}
+
+fn fixed_pplen() -> u64 $pre @public {
+    55
+}
+
+fn fixed'(x : Coef) -> Num where Field[N] {
+    fixed(x, fixed_len(), fixed_pplen())
+}
+
+// a 2-element vector of fixed-point numbers
+type Point : Unqualified = tuple[Num $pre @public, Num $pre @public];
+
+// a 2x2 matrix of fixed-point numbers in row-major order
+// [ m.0 m.1 ]
+// [ m.2 m.3 ]
+type Mat : Unqualified = tuple[Num $pre @public, Num $pre @public, Num $pre @public, Num $pre @public];
+
+fn add_fixed_checked[$S, @D](x : Fixed[N, $S, @D], y : Fixed[N, $S, @D]) -> Fixed[N, $S, @D] where Field[N] {
+    let res = add_fixed(x, y);
+    check_fixed(res);
+    res
+}
+
+fn sub_fixed_checked[$S, @D](x : Fixed[N, $S, @D], y : Fixed[N, $S, @D]) -> Fixed[N, $S, @D] where Field[N] {
+    let res = sub_fixed(x, y);
+    check_fixed(res);
+    res
+}
+
+fn mat_add(m1 : Mat, m2: Mat) -> Mat where Field[N] {
+    (add_fixed_checked(m1.0, m2.0), add_fixed_checked(m1.1, m2.1),
+     add_fixed_checked(m1.2, m2.2), add_fixed_checked(m1.3, m2.3))
+}
+
+fn mul_scalar_mat(c : Num, m : Mat) -> Mat where Field[N] {
+    (mult_fixed(c, m.0), mult_fixed(c, m.1),
+     mult_fixed(c, m.2), mult_fixed(c, m.3))
+}
+
+fn mat_determinant(m : Mat) -> Num where Field[N] {
+    sub_fixed_checked(mult_fixed(m.0, m.3), mult_fixed(m.1, m.2))
+}
+
+fn mat_trace(m : Mat) -> Num where Field[N] {
+    add_fixed_checked(m.0, m.3)
+}
+
+fn mat_cond(b : bool[N] $post @prover, m1 : Mat, m2 : Mat) -> Mat where Field[N] {
+    (fixed_cond(b, m1.0, m2.0), fixed_cond(b, m1.1, m2.1),
+     fixed_cond(b, m1.2, m2.2), fixed_cond(b, m1.3, m2.3))
+}
+
+fn mat_transpose(m : Mat) -> Mat {
+    (m.0, m.2,
+     m.1, m.3)
+}
+
+// [m1.0 m1.1]   [m2.0 m2.1]   [m1.0*m2.0+m1.1*m2.2  m1.0*m2.1+m1.1*m2.3]
+// [m1.2 m1.3] * [m2.2 m2.3] = [m1.2*m2.0+m1.3*m2.2  m1.2*m2.1+m1.3*m2.3]
+fn mat_mul(m1 : Mat, m2 : Mat) -> Mat where Field[N] {
+    (add_fixed_checked(mult_fixed(m1.0, m2.0), mult_fixed(m1.1, m2.2)), add_fixed_checked(mult_fixed(m1.0, m2.1), mult_fixed(m1.1, m2.3)),
+     add_fixed_checked(mult_fixed(m1.2, m2.0), mult_fixed(m1.3, m2.2)), add_fixed_checked(mult_fixed(m1.2, m2.1), mult_fixed(m1.3, m2.3)))
+}
+
+// [m.0 m.1]   [p.0]   [m.0*p.0+m.1*p.1]
+// [m.2 m.3] * [p.1] = [m.2*p.0+m.3*p.1]
+fn mul_mat_point(m : Mat, p : Point) -> Point where Field[N] {
+    (add_fixed_checked(mult_fixed(m.0, p.0), mult_fixed(m.1, p.1)),
+     add_fixed_checked(mult_fixed(m.2, p.0), mult_fixed(m.3, p.1)))
+}
+
+fn rotation_matrix(cos_theta : Num, sin_theta : Num) -> Mat where Field[N] {
+    (cos_theta, negate_fixed(sin_theta),
+     sin_theta, cos_theta)
+}
+
+fn point_add(p1 : Point, p2: Point) -> Point where Field[N] {
+    (add_fixed_checked(p1.0, p2.0), add_fixed_checked(p1.1, p2.1))
+}
+
+fn point_sub(p1 : Point, p2: Point) -> Point where Field[N] {
+    (sub_fixed_checked(p1.0, p2.0), sub_fixed_checked(p1.1, p2.1))
+}
+
+fn point_mean(points : list[Point]) -> Point where Field[N] {
+    let n = length(points);
+    dbg_assert(n > 0);
+    let mut s = points[0];
+    for i in 1 .. n {
+        s = point_add(s, points[i]);
+    }
+    let n_fixed = uint_to_fixed((wire { n as uint[N] }) as @prover, fixed_len(), fixed_pplen());
+    (div_fixed(s.0, n_fixed), div_fixed(s.1, n_fixed))
+
+}
+
+fn length_squared(p : Point) -> Num where Field[N] {
+    add_fixed_checked(mult_fixed(p.0, p.0), mult_fixed(p.1, p.1))
+}
+
+// multiply a column vector and a row vector to get a 2x2 matrix
+// [col.0]
+// [col.1] * [row.0 row.1]
+fn mul_col_row(col : Point, row : Point) -> Mat where Field[N] {
+    (mult_fixed(col.0, row.0), mult_fixed(col.0, row.1),
+     mult_fixed(col.1, row.0), mult_fixed(col.1, row.1))
+}
+
+fn sqr_fixed(x : Num) -> Num where Field[N] {
+    mult_fixed(x, x)
+}
+
+// returns 1 if x >= 0, 0 if x == 0, and -1 if x < 0
+fn signum_fixed(x : Num) -> Num where Field[N] {
+    let zero : Num = fixed(0, x.len, x.pplen);
+    let one : Num = fixed(pow_pre(2, x.pplen), x.len, x.pplen);
+    let minus_one : Num = negate_fixed(one);
+    fixed_cond(eq_fixed(x, zero), zero, fixed_cond(ge_fixed(x, zero), one, minus_one))
+}
+
+// returns 1 if x >= 0 and -1 if x < 0
+fn signum_nonzero_fixed(x : Num) -> Num where Field[N] {
+    let zero : Num = fixed(0, x.len, x.pplen);
+    let one : Num = fixed(pow_pre(2, x.pplen), x.len, x.pplen);
+    let minus_one : Num = negate_fixed(one);
+    fixed_cond(ge_fixed(x, zero), one, minus_one)
+}
+
+fn abs_fixed(x : Num) -> Num where Field[N] {
+    mult_fixed(signum_nonzero_fixed(x), x)
+}
+
+fn debug_print_mat(s : string $pre @public, m : Mat) where Field[N] {
+    dbg_print(s);
+    dbg_print(fixed_to_string(m.0));
+    dbg_print(fixed_to_string(m.1));
+    dbg_print(fixed_to_string(m.2));
+    dbg_print(fixed_to_string(m.3));
+}
+
+// closed formula for SVD of a 2x2 real matrix from
+//     https://www.researchgate.net/publication/263580188_Closed_Form_SVD_Solutions_for_2_x_2_Matrices_-_Rev_2 . Section 4. The formulae are explicitly given at the beginning of the section.
+fn mat_svd(m : Mat) -> tuple[Mat, Mat, Mat] where Field[N] {
+    dbg_print("svd" : string $pre @public);
+    let a = m.0;
+    let b = m.2;
+    let c = m.1;
+    let d = m.3;
+    let zero : Num = fixed'(0);
+    let half : Num = fixed'(pow_pre(2, fixed_pplen() - 1));
+    let one : Num = fixed'(pow_pre(2, fixed_pplen()));
+    let two : Num = fixed'(pow_pre(2, fixed_pplen() + 1));
+    let four : Num = fixed'(pow_pre(2, fixed_pplen() + 2));
+    let det = mat_determinant(m); // ad - bc
+    let a2 = sqr_fixed(a);
+    let b2 = sqr_fixed(b);
+    let c2 = sqr_fixed(c);
+    let d2 = sqr_fixed(d);
+    let t1 = mult_fixed(two, det); // 2(ad - bc)
+    let t2 = add_fixed_checked(add_fixed_checked(a2, b2), add_fixed_checked(c2, d2)); // a^2 + b^2 + c^2 + d^2
+    let t3 = sqrt_fixed(add_fixed_checked(t2, t1)); // sqrt(t2 + t1)
+    let t4 = sqrt_fixed(sub_fixed_checked(t2, t1)); // sqrt(t2 - t1)
+    let lambda1 = mult_fixed(half, add_fixed_checked(t3, t4)); // (t3 + t4)/2
+    let lambda2 = mult_fixed(half, abs_fixed(sub_fixed_checked(t3, t4))); // |t3 - t4|/2
+    let t5 = sub_fixed_checked(a2, d2); // a^2 - d^2
+    let t6 = sub_fixed_checked(b2, c2); // b^2 - c^2
+    let t7 = sub_fixed_checked(t5, t6); // t5 - t6
+    let t8 = add_fixed_checked(t5, t6); // t5 + t6
+    let t9 = sqrt_fixed(sub_fixed_checked(sqr_fixed(t2), mult_fixed(four, sqr_fixed(det)))); // sqrt(t2^2 - 4(ad - bc)^2)
+    let t10 = div_fixed(t7, t9); // t7 / t9
+    let t11 = div_fixed(t8, t9); // t8 / t9
+    let t12 = signum_fixed(add_fixed_checked(mult_fixed(a, b), mult_fixed(c, d))); // sgn(ab + cd)
+    let t13 = signum_fixed(add_fixed_checked(mult_fixed(a, c), mult_fixed(b, d))); // sgn(ac + bd)
+    let s = mult_fixed(t12, t13); // t12 * t13
+    let t14 = signum_fixed(add_fixed_checked(a, mult_fixed(s, d))); // sgn(a + sd)
+    let cos_theta_l = sqrt_fixed(mult_fixed(half, add_fixed_checked(one, t10))); // sqrt((1 + t10)/2)
+    let cos_theta_r = sqrt_fixed(mult_fixed(half, add_fixed_checked(one, t11))); // sqrt((1 + t11)/2)
+    let sin_theta_l = mult_fixed(t12, sqrt_fixed(mult_fixed(half, sub_fixed_checked(one, t10)))); // t12 * sqrt((1 - t10)/2)
+    let sin_theta_r = mult_fixed(t13, sqrt_fixed(mult_fixed(half, sub_fixed_checked(one, t11)))); // t13 * sqrt((1 - t11)/2)
+    let mat_I = (one, zero, zero, one);
+    let mat_J = (one, zero, zero, negate_fixed(one));
+    let mat_Sigma1 = mul_scalar_mat(t14, mat_I);
+    let mat_Sigma2 = mul_scalar_mat(t14, mat_J);
+    let mat_Sigma = mat_cond(ge_fixed(det, zero), mat_Sigma1, mat_Sigma2);
+    let mat_u = rotation_matrix(cos_theta_l, sin_theta_l);
+    let mat_d = (lambda1, zero, zero, lambda2);
+    let mat_v = mat_mul(mat_Sigma, mat_transpose(rotation_matrix(cos_theta_r, sin_theta_r)));
+    (mat_u, mat_d, mat_transpose(mat_v))
+}
+
+// assumes that the maximum absolute value among inputs is (at most) 0.5 to get maximum precision but avoiding overflow
+fn find_similarity_transform_normalized(initial_shape : list[Num], current_shape : list[Num]) -> tuple[Mat, Point] where Field[N] {
+    dbg_assert(length(initial_shape) == length(current_shape));
+    let n = length(initial_shape) / 2;
+    dbg_assert(length(initial_shape) == 2 * n);
+    let from_points : list[Point] =
+        for i in 0 .. n {
+            (initial_shape[2*i], initial_shape[2*i+1])
+        };
+    let to_points : list[Point] =
+        for i in 0 .. n {
+            (current_shape[2*i], current_shape[2*i+1])
+        };
+    let mean_from = point_mean(from_points);
+    let mean_to = point_mean(to_points);
+    let mut sigma_from = length_squared(point_sub(from_points[0], mean_from));
+    let mut cov = mul_col_row(point_sub(to_points[0], mean_to), point_sub(from_points[0], mean_from));
+    for i in 1 .. n {
+        sigma_from = add_fixed_checked(sigma_from, length_squared(point_sub(from_points[i], mean_from)));
+        cov = mat_add(cov, mul_col_row(point_sub(to_points[i], mean_to), point_sub(from_points[i], mean_from)));
+    }
+    let n_fixed = uint_to_fixed((wire { n as uint[N] }) as @prover, fixed_len(), fixed_pplen());
+    sigma_from = div_fixed(sigma_from, n_fixed);
+    cov.0 = div_fixed(cov.0, n_fixed);
+    cov.1 = div_fixed(cov.1, n_fixed);
+    cov.2 = div_fixed(cov.2, n_fixed);
+    cov.3 = div_fixed(cov.3, n_fixed);
+    let svd = mat_svd(cov);
+    let u = svd.0;
+    let d = svd.1;
+    let v = svd.2;
+    let det_cov = mat_determinant(cov);
+    let zero : Num = fixed'(0);
+    let one : Num = fixed'(pow_pre(2, fixed_pplen()));
+    let minus_one = negate_fixed(one);
+    let b1 = lt_fixed(det_cov, zero) | (eq_fixed(det_cov, zero) & lt_fixed(mult_fixed(mat_determinant(u), mat_determinant(v)), zero)); // This is taken from dlib code. It transforms the result of SVD so that we get the similarity transform.
+    let b2 = lt_fixed(d.3, d.0);
+    let s = (fixed_cond(b1 & !b2, minus_one, one), zero,
+             zero, fixed_cond(b1 & b2, minus_one, one));
+    let r = mat_mul(mat_mul(u, s), mat_transpose(v));
+    let c = div_fixed(mat_trace(mat_mul(d, s)), sigma_from);
+    let cr = mul_scalar_mat(c, r);
+    let t = point_sub(mean_to, mul_mat_point(cr, mean_from));
+    (cr, t) // On the first call (when initial_shape == current_shape) this returns a unit matrix and a zero vector
+}
+
+pub fn find_similarity_transform(initial_shape : list[Num], current_shape : list[Num]) -> tuple[Mat, Point] where Field[N] {
+    dbg_print("find_similarity_transform: begin" : string $pre @public);
+    let input_len = initial_shape[0].len;
+    let input_pplen = initial_shape[0].pplen;
+    dbg_assert(fixed_pplen() >= input_pplen);
+    let pplen_diff = fixed_pplen() - input_pplen;
+    let pow2 = pow_pre(2, pplen_diff);
+    let to_curr_len = fn (x) { fixed'(x.coef * pow2) };
+    let from_curr_len = fn (x : Num) {
+        let x' = round_down_fixed(x, fixed_len() - pplen_diff, fixed_pplen() - pplen_diff);
+        fixed(x'.coef, input_len, x'.pplen)
+    };
+    let mut m = fixed(1, input_len, input_pplen); // coef 1 instead of 0 to avoid dividing by 0
+    for i in 0 .. length(initial_shape) {
+        m = max_fixed(m, abs_fixed(initial_shape[i]));
+    }
+    for i in 0 .. length(current_shape) {
+        m = max_fixed(m, abs_fixed(current_shape[i]));
+    }
+    m = add_fixed_checked(m, m);
+    // scale values so that maximum absolute value is 0.5
+    // also change to the len and pplen used in this file   "m" is the scaling factor
+    let initial_shape' =
+        for i in 0 .. length(initial_shape) {
+            to_curr_len(div_fixed(initial_shape[i], m))
+        };
+    let current_shape' =
+        for i in 0 .. length(initial_shape) {
+            to_curr_len(div_fixed(current_shape[i], m))
+        };
+    let st = find_similarity_transform_normalized(initial_shape', current_shape');
+    // change len and pplen back to the those of the input
+    // the translation vector t also needs to be scaled by m
+    let cr = (from_curr_len(st.0.0), from_curr_len(st.0.1),
+              from_curr_len(st.0.2), from_curr_len(st.0.3));
+    let t = (mult_fixed(m, from_curr_len(st.1.0)),
+             mult_fixed(m, from_curr_len(st.1.1)));
+    dbg_print("find_similarity_transform: end" : string $pre @public);
+    (cr, t)
+}

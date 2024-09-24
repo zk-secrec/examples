@@ -1,0 +1,74 @@
+/* Log processing use case: Positive variant (proving that all given canaries occur in the text)
+
+Features: Witness does not contain IOC positions in the text, Rabin-Karp algorithm with small modulus (2^61-1) is used for brute force searching. To avoid false positives, base is generated as a Verifier challenge for each canary length.
+
+*/
+
+use Std::*;
+use Integer::*;
+use Prob::*;
+use RabinKarp::*;
+
+type N : Nat = 2305843009213693951;
+
+fn generate_base[N : Nat]() -> uint[N] $post @verifier 
+where Field[N], Challenge[N]
+{ wire { challenge(1)[0] }
+}
+
+// Assumes that canaries is non-empty
+// Assumes that text length * sum of lengths of canaries is considerably less than N
+fn verify_single[N : Nat]
+( text : arr[uint[N] $post @prover] $pre @public
+, canaries : list[arr[uint[N] $post @prover] $pre @public]
+, max_len : u64 $pre @public
+) 
+where Field[N], Challenge[N], Vectorization
+{ let n = length(text)
+; let m = length(canaries[0])
+; let k = length(canaries)
+; assert(wire { (n >= m) as bool[N] })
+; let prob_log = 1 + log2(N) - log2((m * (n - m) * k) as uint)
+; for z in 0 .. repetition_times(prob_log, 80)
+  { let base = generate_base()
+  ; let pows = powers(base, max_len)
+  ; let vnss : list[arr[uint[N] $post @prover] $pre @public] = for j in 0 .. k 
+    { let elem = arr_scalar_prod(canaries[j], pows, m)
+    ; freeze([elem; n - m + 1])
+    }
+  ; let largestpower = wire { pow_pre(base as $pre, m - 1) }
+  ; let rec vts_list = for i in 0 .. n - m + 1
+    { if (i == 0) { arr_scalar_prod(text, pows, m) }
+      else { shiftvalue(text, i - 1, m, base as @prover, vts_list[i - 1], largestpower as @prover) }
+    }
+  ; let vts = freeze(vts_list)
+  ; for j in 0 .. k { assert_zero(prod(vts -. vnss[j])) }
+  ;
+  }
+;
+}
+
+fn verify[N : Nat]
+( text : arr[uint[N] $post @prover] $pre @public
+, canaries_list : list[list[arr[uint[N] $post @prover]]]
+) 
+where Field[N], Challenge[N], Vectorization
+{ let max_len = length(canaries_list[length(canaries_list) - 1][0])
+; for k in 0 .. length(canaries_list) 
+  { verify_single(text, canaries_list[k], max_len) 
+  }
+;
+}
+
+fn main() 
+where Field[N], Challenge[N], Vectorization
+{ let n = get_public("text_len")
+; let ms : list[u64 $pre @public] = get_public("canary_len_list")
+; let canaries_pre : list[list[uint[N] $pre @verifier] $pre @verifier] $pre @verifier = get_instance("canary_list")
+; let canaries = for i in 0 .. length(ms) { array_to_prover(pre_uint_list_to_post_array(canaries_pre[i as @verifier], ms[i])) }
+; let text_pre = get_witness("text")
+; let text = pre_uint_list_to_post_array(text_pre, n)
+; let a = group_by_length(sort_by_length(canaries))
+; verify(text, a)
+;
+}

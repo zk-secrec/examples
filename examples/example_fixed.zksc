@@ -1,0 +1,43 @@
+use Std::*; // ++
+use Integer::*;
+use Inequalities::*;
+use FixedPoint::*;
+
+type N : Nat = 0x1fffffffffffffff;
+
+fn main() 
+where Field[N]
+{ dbg_print("Hi I'm here!" : string $pre @public)
+; let n = 10
+; let len = 24
+; let pplen = 8
+; let bwlim = log2(N) as u64 - 1
+; let mut sizeasserters = sizeasserters_new(bwlim)
+; let one_fixed = uint_to_fixed3(1, len, pplen, ref sizeasserters)
+; for i in 1 .. n
+  { dbg_print("i=" ++ to_string(i))
+  ; let i_modular : uint[N] $pre @public = i as uint as uint[N]
+  ; let i_post = (wire { i_modular }) as @prover
+  ; let i_fixed = uint_to_fixed3(i_post, len, pplen, ref sizeasserters)
+//   ; dbg_print(fixed_to_string(i_fixed))
+//   ; dbg_print(fixed_to_bitstring(i_fixed))
+  ; let i_negfixed = negate_fixed(i_fixed)
+//   ; dbg_print(fixed_to_string(i_negfixed))
+//   ; dbg_print(fixed_to_bitstring(i_negfixed))
+  ; let sqr_fixed = mult_fixed3(i_fixed, i_fixed, ref sizeasserters)
+  ; let sqr_negfixed = mult_fixed3(i_negfixed, i_fixed, ref sizeasserters)
+//   ; dbg_print(fixed_to_string(fixed_pre(add_fixed3(i_fixed, sqr_negfixed, ref sizeasserters))))
+  ; let i_recip = div_fixed3(one_fixed, i_fixed, ref sizeasserters)
+  ; dbg_print(fixed_to_string(fixed_pre(i_recip)))
+  ; let i_negrecip = div_fixed3(one_fixed, i_negfixed, ref sizeasserters)
+  ; dbg_print(fixed_to_string(fixed_pre(i_negrecip)))
+  ; assert(lt_fixed3(i_negrecip, i_recip, ref sizeasserters))
+  ; assert(le_fixed3(i_recip, one_fixed, ref sizeasserters))
+  ; let i_sqrt = sqrt_fixed3(i_fixed, ref sizeasserters)
+//   ; let i_sqrt = sqrt_fixed3(i_negfixed, ref sizeasserters)
+  ; let i_recipsqrt = div_fixed3(one_fixed, i_sqrt, ref sizeasserters)
+  ; dbg_print(fixed_to_string(fixed_pre(i_sqrt)))
+  ; dbg_print(fixed_to_string(fixed_pre(i_recipsqrt)))
+  }
+; assert_zero(0 : uint[N] $post @prover)
+}

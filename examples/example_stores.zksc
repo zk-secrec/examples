@@ -1,0 +1,163 @@
+use Std::*;
+use Store::*;
+
+pub type N : Nat = 2305843009213693951;
+
+struct StorePair {
+    fst : Store[N, $post, @prover],
+    snd : Store[N, $post, @prover],
+}
+
+fn newStorePair() -> StorePair where Field[N] {
+    StorePair {
+        fst : store_new_nodef(),
+        snd : store_new_nodef(),
+    }
+}
+
+fn initialize_store(ref st : Store[N, $post, @prover]) {
+    let k1 : uint[N] $post @prover = 33;
+    let v1 : uint[N] $post @prover = 333;
+    st{# k1} = v1;
+    // store_write(ref st, k1, v1);
+}
+
+fn initialize_StorePair(ref sp : StorePair) {
+    initialize_store(ref sp.fst);
+    initialize_store(ref sp.snd);
+}
+
+fn use_store(ref st : Store[N, $post, @prover]) where Field[N] {
+    let k1 : uint[N] $post @prover = 33;
+    let v1 : uint[N] $post @prover = 333;
+    let r1 = st{# k1};
+    // let r1 = store_read(ref st, k1);
+    let r1 = st{# k1};
+    // let r1 = store_read(ref st, k1);
+    assert_zero(r1 - v1);
+}
+
+fn main() where Field[1030307], Field[N], Vectorization {
+    // immutable builtin $pre stores
+    let k1 : uint $pre @public = 33;
+    let v1 : uint $pre @public = 334;
+    let k2 : uint $pre @public = 44;
+    let v2 : uint $pre @public = 445;
+    let st1 : store[uint, uint] $pre @public = {## k2 => v2, k1 => v1};
+    let r1 = st1{## k2};
+    dbg_assert(r1 == v2);
+
+    // mutable builtin $pre stores
+    let k2 : uint[1030307] $pre @prover = 34;
+    let v2 : uint[1030307] $pre @prover = 334;
+    let mut st2 : store[uint[1030307], uint[1030307]] $pre @prover = {## k2 => v2};
+    let k1 : uint[1030307] $pre @prover = 33;
+    let v1 : uint[1030307] $pre @prover = 333;
+    st2{## k1} = v1;
+    let r1 = st2{## k2};
+    dbg_assert(r1 == v2);
+
+    // mutable non-builtin $pre stores modulo 1030307
+    let mut st3 : Store[1030307, $pre, @prover] = store_new_nodef();
+    let k1 : uint[1030307] $pre @prover = 33;
+    let v1 : uint[1030307] $pre @prover = 333;
+    st3{# k1} = v1;
+    // store_write(ref st3, k1, v1);
+    let r1 = st3{# k1};
+    let r1 = st3{# k1};
+    let r1 = st3{# k1};
+    // let r1 = store_read(ref st3, k1);
+    // let r1 = store_read(ref st3, k1);
+    // let r1 = store_read(ref st3, k1);
+    dbg_assert(r1 == v1);
+    let n : u64 $pre @public = 5;
+    for i in 0 .. n {
+        st3{# k1} = st3{# k1} + 1;
+        // store_write(ref st3, k1, store_read(ref st3, k1) + 1);
+        let r1 = st3{# k1};
+        // let r1 = store_read(ref st3, k1);
+        dbg_assert(r1 - (v1 + (i+1) as uint as uint[1030307] as @prover) == 0);
+    }
+
+    // mutable $post stores modulo 1030307
+    let mut st3 : Store[1030307, $post, @prover] = store_new_nodef();
+    let k1 : uint[1030307] $post @prover = 33;
+    let v1 : uint[1030307] $post @prover = 333;
+    st3{# k1} = v1;
+    // store_write(ref st3, k1, v1);
+    let r1 = st3{# k1};
+    let r1 = st3{# k1};
+    let r1 = st3{# k1};
+    // let r1 = store_read(ref st3, k1);
+    // let r1 = store_read(ref st3, k1);
+    // let r1 = store_read(ref st3, k1);
+    assert_zero(r1 - v1);
+    let n : u64 $pre @public = 5;
+    for i in 0 .. n {
+        st3{# k1} = st3{# k1} + 1;
+        // store_write(ref st3, k1, store_read(ref st3, k1) + 1);
+        let r1 = st3{# k1};
+        // let r1 = store_read(ref st3, k1);
+        assert_zero(r1 - (v1 + ((wire{(i+1) as uint as uint[1030307]}) as @prover)));
+    }
+
+    // mutable $post stores modulo N
+    let k1 : uint[N] $post @prover = 33;
+    let v1 : uint[N] $post @prover = 333;
+    for i in 0 .. n {
+        let mut st4 : Store[N, $post, @prover] = store_new_nodef();
+        st4{# k1} = v1;
+        // store_write(ref st4, k1, v1);
+        let r2 = st4{# k1};
+        let r2 = st4{# k1};
+        let r2 = st4{# k1};
+        // let r2 = store_read(ref st4, k1);
+        // let r2 = store_read(ref st4, k1);
+        // let r2 = store_read(ref st4, k1);
+        assert_zero(r2 - v1);
+    }
+
+    // $post stores as ref-arguments
+    let mut st5 : Store[N, $post, @prover] = store_new_nodef();
+    initialize_store(ref st5); // write a value into the store
+    use_store(ref st5);
+    let r1 = st5{# k1};
+    // let r1 = store_read(ref st5, k1);
+    assert_zero(r1 - v1);
+
+    // $post stores in a list
+    let mut sts5 : list[Store[N, $post, @prover]] = for i in 0 .. n { store_new_nodef() };
+    for i in 0 .. n {
+        initialize_store(ref sts5[i]);
+        use_store(ref sts5[i]);
+        sts5[i]{# k1} = v1;
+        // store_write(ref sts5[i], k1, v1);
+        let r1 = sts5[i]{# k1};
+        // let r1 = store_read(ref sts5[i], k1);
+        assert_zero(r1 - v1);
+    }
+
+    // $post stores in a struct
+    let mut sp = newStorePair();
+    initialize_StorePair(ref sp);
+    use_store(ref sp.fst);
+    use_store(ref sp.snd);
+    sp.fst{# k1} = v1;
+    // store_write(ref sp.fst, k1, v1);
+    sp.snd{# k1} = v1;
+    // store_write(ref sp.snd, k1, v1);
+    let r1 = sp.fst{# k1};
+    // let r1 = store_read(ref sp.fst, k1);
+    assert_zero(r1 - v1);
+    let r1 = sp.snd{# k1};
+    // let r1 = store_read(ref sp.snd, k1);
+    assert_zero(r1 - v1);
+
+    let mut st6 = store_new(true,true,false);
+    initialize_store(ref st6);
+    // Uncomment when you want to test failing
+    // let trash = st6{# 100};
+    // initialize_store(ref st6);
+
+    {}
+}

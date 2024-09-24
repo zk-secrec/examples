@@ -1,0 +1,115 @@
+use Std::*;
+
+pub fn group_by_length[N : Nat,$S,@D,A : Qualified -> Unqualified]
+( a : list[A[uint[N] $S @D] $pre @public]
+) -> list[list[A[uint[N] $S @D] $pre @public]] 
+where Field[N], Array[A]
+{ let mut l  = 1
+; for i in 1 .. length(a) 
+  { if !(length(a[i]) == length(a[i - 1])) { l = l + 1 }
+  }
+; let mut glens = [0; l]
+; let mut j = 0
+; glens[j] = glens[j] + 1
+; for i in 1 .. length(a) 
+  { if !(length(a[i]) == length(a[i - 1])) { j = j + 1 }
+  ; glens[j] = glens[j] + 1
+  }
+; let mut s = 0
+; for j in 0 .. l 
+  { let t = for k in 0 .. glens[j] { a[s + k] }
+  ; s = s + glens[j]
+  ; t
+  }
+}
+
+fn merge_by_length[N : Nat,$S,@D,A : Qualified -> Unqualified]
+( a : list[A[uint[N] $S @D] $pre @public]
+, b : list[A[uint[N] $S @D] $pre @public]
+) -> list[A[uint[N] $S @D] $pre @public] 
+where Field[N], Array[A]
+{ let n = length(a)
+; let m = length(b)
+; let mut i = 0
+; let mut j = 0
+; for k in 0 .. n + m 
+  { if (i == length(a)) { let r = b[j]; j = j + 1; r }
+    else if (j == length(b)) { let r = a[i]; i = i + 1; r }
+    else if (length(a[i]) <= length(b[j])) { let r = a[i]; i = i + 1; r }
+    else { let r = b[j]; j = j + 1; r }
+  }
+}
+
+fn sorted_seeds[N : Nat,$S,@D,A : Qualified -> Unqualified]
+( a : list[A[uint[N] $S @D] $pre @public]
+) -> list[list[A[uint[N] $S @D] $pre @public]] 
+where Field[N], Array[A]
+{ for i in 0 .. length(a) { [a[i]] }
+}
+
+unchecked eff [[*]] -> [*] ! $pre
+fn treefold[N : Nat,$S,@D,A : Qualified -> Unqualified]
+( a : list[list[A[uint[N] $S @D] $pre @public]]
+) -> list[A[uint[N] $S @D] $pre @public] 
+where Field[N], Array[A] 
+{ let n = length(a)
+; if (n == 1) { a[0] }
+  else 
+  { let q = (n / 2) + (n % 2)
+  ; let pairwise_merged = for i in 0 .. q 
+    { if (2 * i + 1 >= n) { a[2 * i] }
+      else { merge_by_length(a[2 * i], a[2 * i + 1]) }
+    }
+  ; treefold(pairwise_merged)
+  }
+}
+
+pub fn sort_by_length[N : Nat,$S,@D,A : Qualified -> Unqualified]
+( a : list[A[uint[N] $S @D] $pre @public]
+) -> list[A[uint[N] $S @D] $pre @public] 
+where Field[N], Array[A] 
+{ treefold(sorted_seeds(a))
+}
+
+pub fn prefixvalue[N : Nat,$S,@D1,@D2,@D](text : list[uint[N] $S @D2], m : u64 $pre @public, base : uint[N] $S @D1) -> uint[N] $S @D
+  where Field[N], @D1 <= @D, @D2 <= @D {
+  let mut v = 0;
+  for i in 0 .. m { v = v * (base as @D) + (text[i] as @D); }
+  v
+}
+
+pub fn powers[N : Nat,$S,@D]
+( base : uint[N] $S @D
+, m : u64 $pre @public
+) -> arr[uint[N] $S @D]
+where Vectorization
+{ let rec res = for i in 0 .. m
+  { if (i == 0) { 1 }
+    else { base * res[i - 1] }
+  }
+; freeze(reverse(res))
+}
+
+pub fn arr_scalar_prod[N : Nat,$S,@D1,@D2,@D]
+( xs : arr[uint[N] $S @D2] $pre @public
+, ys : arr[uint[N] $S @D1] $pre @public
+, len : u64 $pre @public
+) -> uint[N] $S @D
+where @D1 <= @D, @D2 <= @D, Vectorization
+{ let xs_uc : arr[uint[N] $S @D] $pre @public = zip x in xs[0 .. len] with { x as @D }
+; let ys_uc : arr[uint[N] $S @D] $pre @public = zip y in ys[0 .. len] with { y as @D }
+; sum(xs_uc *. ys_uc)
+}
+
+pub fn shiftvalue[N : Nat,$S,@D,A : Qualified -> Unqualified]
+( text : A[uint[N] $S @D] $pre @public
+, pos : u64 $pre @public
+, m : u64 $pre @public
+, base : uint[N] $S @D
+, value : uint[N] $S @D
+, largestpower : uint[N] $S @D
+) -> uint[N] $S @D
+where Field[N], Array[A]
+{ (value - text[pos] * largestpower) * base + text[pos + m]
+}
+

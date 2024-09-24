@@ -1,0 +1,35 @@
+use Std::*;
+use Integer::*;
+use Bitextract::*;
+use FixedPoint::*;
+use Inequalities::*;
+use SqrtUtil::*;
+use Coord::*;
+use FG::*;
+
+sieve fn dist_sqr_helper[N : Nat, @D](a : Coord[N, $post, @D], b : Coord[N, $post, @D]) -> uint[N] $post @D {
+
+  sqr(a.0.coef - b.0.coef) + sqr(a.1.coef - b.1.coef)
+
+}
+
+//this version is used for distance calculating (includes square root)
+pub sieve fn dist_inf[N : Nat](a : Coord[N, $post, @prover], b : Coord[N, $post, @prover], p2k : uint[N] $post @public) -> uint[N] $post @prover
+  where Field[N] {
+  let len = a.0.len;
+  let pplen = a.0.pplen;
+
+  let mid = dist_sqr_helper(a, b);
+  let dist_sqr_coef : uint $pre @prover = (mid as $pre / p2k as $pre as @prover) as uint;
+  
+  let dist_coef = wire{sqrt_coef(dist_sqr_coef,pplen) as uint[N]};
+
+  let left = mid - dist_coef * dist_coef;
+  trace "Checking line segment distance coefficient correctness" {
+    check_fit_post_prover(left, len - 1);
+    check_fit_post_prover(dist_coef + dist_coef - left, len - 1);
+  }
+
+  // Don't need to return a FixedPoint, can just sum all the distance coefficients (and check that the result fits into len bits) later
+  dist_coef
+}

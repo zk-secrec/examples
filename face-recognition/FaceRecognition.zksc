@@ -1,0 +1,105 @@
+// ./runrust docs/resnet/FaceRecognition.zksc docs/resnet/FaceRecognition_public.json docs/resnet/FaceRecognition_instance.json docs/resnet/FaceRecognition_witness.json -e docs/resnet/resnet_externs.rs -o out
+
+use FaceAligner::*;
+use ResidualNetwork::*;
+use FastFixedPoint::*;
+use Bitextract::*;
+use Integer::*;
+use Std::*;
+
+type N : Nat = 170141183460469231731687303715884105727; // 2^127-1
+
+type Int : Qualified = uint[N] $post @prover; // signed or unsigned integer
+
+fn fixed_scalar_prod[$S, @D](xs : list[Fixed[N, $S, @D]], ys : list[Fixed[N, $S, @D]]) -> Fixed[N, $S, @D] where Field[N] {
+    dbg_assert(length(xs) == length(ys));
+    let mut result : Fixed[N, $S, @D] = fixed(0, xs[0].len, xs[0].pplen);
+    for i in 0 .. length(xs) {
+        result = add_fixed(result, mult_fixed(xs[i], ys[i]));
+    }
+    check_fixed(result);
+    result
+}
+
+fn sqdist[$S, @D](xs : list[Fixed[N, $S, @D]], ys : list[Fixed[N, $S, @D]]) -> Fixed[N, $S, @D] where Field[N] {
+    dbg_assert(length(xs) == length(ys));
+    let diff =
+        for i in 0 .. length(xs) {
+            sub_fixed(xs[i], ys[i])
+        };
+    fixed_scalar_prod(diff, diff)
+}
+
+fn main() where Field[N], Vectorization {
+    dbg_print("start" : string $pre @public);
+
+    let num_face_descriptors : u64 $pre @public = get_public("num_face_descriptors"); // Number of faces to which we compare the face in the input image
+    let num_rows : u64 $pre @public = get_public("num_rows"); // Size of the input image
+    let num_cols : u64 $pre @public = get_public("num_cols"); // Size of the input image
+    let image_pre : list[list[uint[N] $pre @prover] $pre @prover] $pre @prover = get_witness("image");
+    let rect_left : Int = wire { get_witness("rect_left") };  // rect: the position in the input image where the face is located
+    let rect_right : Int = wire { get_witness("rect_right") };
+    let rect_top : Int = wire { get_witness("rect_top") };
+    let rect_bottom : Int = wire { get_witness("rect_bottom") };
+    let face_descriptors_pre : list[list[uint[N] $pre @verifier] $pre @verifier] $pre @verifier = get_instance("face_descriptors");
+
+    let image : list[list[Int]] =
+        for i in 0 .. num_rows {
+            for j in 0 .. num_cols {
+                let x = wire { image_pre[i as @prover][j as @prover] };
+                let trash = bitextract(x, 8); // check that x is in the range 0..255
+                x
+            }
+        };
+
+    let fa : FaceAligner = init_face_aligner();
+    let xv = apply_face_aligner(fa, image, rect_left, rect_right, rect_top, rect_bottom);
+
+    let xs = thaw(xv);
+    let face : list[list[uint[N] $post @prover]] = [xs, xs, xs];
+
+    let r : Resnet = init_resnet();
+    let output = apply_resnet(r, face);
+
+    let mut s : string $pre @prover = "output of the final layer (128 values): ";
+    for i in 0 .. length(output) {
+        let s3 = fixed_to_string(output[i]);
+        let s4 = if (i > 0) { string_append(", ", s3) } else { s3 };
+        s = string_append(s, s4);
+    }
+    dbg_print(s);
+
+    let mut s : string $pre @prover = "\"face_descriptor\": [";
+    for i in 0 .. length(output) {
+        let s2 = to_string(signed_uintN_to_uint(output[i].coef as $pre));
+        let s3 = string_append("\"", string_append(s2, "\""));
+        let s4 = if (i > 0) { string_append(", ", s3) } else { s3 };
+        s = string_append(s, s4);
+    }
+    s = string_append(s, "],");
+    dbg_print(s);
+    dbg_assert(length(output) == 128);
+
+    let d2_threshold : Fixed[N, $post, @prover] =
+            div_fixed(uint_to_fixed(9, output[0].len, output[0].pplen),
+                      uint_to_fixed(25, output[0].len, output[0].pplen)); // 9/25 = 0.36 = 0.6^2
+    dbg_print(string_append("d2_threshold = ", fixed_to_string(d2_threshold as $pre)));
+
+    dbg_assert(length(face_descriptors_pre) == num_face_descriptors as @verifier);
+    for i in 0 .. num_face_descriptors {
+        dbg_print(string_append("Comparing to face descriptor ", to_string(i)));
+        let face_descriptor_pre = face_descriptors_pre[i as @verifier];
+        dbg_assert(length(face_descriptor_pre) == 128);
+        let face_descriptor : list[Fixed[N, $post, @prover]] =
+            for i in 0 .. 128 {
+                fixed((wire { face_descriptor_pre[i as @verifier] }) as @prover, output[0].len, output[0].pplen)
+            };
+        let d2 = sqdist(output, face_descriptor);
+        dbg_print(string_append("d2 = ", fixed_to_string(d2 as $pre)));
+        let is_same_person = lt_fixed(d2, d2_threshold);
+        dbg_print(string_append("is_same_person = ", to_string(is_same_person as $pre)));
+        //assert(is_same_person);
+    }
+
+    {}
+}

@@ -1,0 +1,14 @@
+default(127);
+
+sieve fn f[N : Nat](x : uint[N] $pre @public, y : uint[N] $post @prover) 
+where Field[N] 
+{ assert_zero(y) }
+
+fn main[N : Nat]() 
+where Field[N], Vectorization
+{ let x : uint[N] $pre @public = 1
+; let ys : arr[uint[N] $post @prover] = freeze([0; 10])
+; let g = f(x)
+; let trash : arr[() $pre @public] = g.(ys)
+;
+}

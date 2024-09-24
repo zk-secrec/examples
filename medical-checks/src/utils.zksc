@@ -1,0 +1,41 @@
+use Std::*;
+use String::*;
+
+// type N61 : Nat = 0x1FFFFFFFFFFFFFFF;
+
+pub fn uint_list_to_post_upto[N : Nat, @D]
+( a : list[uint[N] $pre @D] $pre @D
+, len : u64 $pre @public
+) -> list[uint[N] $post @D]
+where Field[N]
+{ for i in 0 .. len { wire { a[i as @D] } }
+}
+
+// In the case of Prover's domain, this function is to be used only for passing witness to the circuit
+// Otherwise check would be needed
+pub fn uint_list_to_post_string_upto[N : Nat, @D](a : list[uint[N] $pre @D] $pre @D, len : u64 $pre @public) -> String[$post, @D, N]
+where Field[N]
+{ String
+  { chars: for i in 0 .. len { wire { if (i as @D < length(a)) { a[i as @D] } else { 0 } } }
+  , len: wire { length(a) as uint[N] }
+  }
+}
+
+pub fn pair_list_to_post_upto[N : Nat, @D]
+( a : list[tuple[uint[N] $pre @D
+, uint[N] $pre @D]] $pre @D
+, len : u64 $pre @public
+) -> list[tuple[uint[N] $post @D, uint[N] $post @D]]
+where Field[N]
+{ for i in 0 .. len { (wire { (a[i as @D]).0 }, wire { (a[i as @D]).1 }) }
+}
+
+unchecked eff [*] -> * -> * ! @public
+pub fn assert_true_cnt[N : Nat]
+( bools : list[bool[N] $post @prover]
+, expected : u64 $pre @public
+)
+where Field[N]
+{ let cnt = count(bools, id)
+; assert_zero(cnt - (wire { expected as uint[N] }) as @prover);
+}

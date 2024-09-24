@@ -1,0 +1,46 @@
+fn mut_reverse[T : Unqualified, $S, @D](ref xs : list[T $S @D]) {
+	let n = length(xs);
+	let m = n / 2;
+	for i in 0 .. m {
+		let t = xs[i];
+		xs[i] = xs[n-1-i];
+		xs[n-1-i] = t;
+	}
+	{}
+}
+
+fn reverse[T : Unqualified, $S, @D](xs : list[T $S @D]) -> list[T $S @D] {
+	for i in 0 .. length(xs) {
+		xs[length(xs)-1-i]
+	}
+}
+
+type u : Nat = 1030307;
+type b : Nat = 2;
+
+type U : Unqualified = uint[u];
+type B : Unqualified = bool[b];
+
+fn main() where Field[u], Field[b] {
+    let mut xs0 : list[uint $pre @verifier] = [1,2,3,4];
+	mut_reverse(ref xs0);
+	let xs1 : list[U $post @prover] = [5,6,7,8];
+	let xs2 = reverse(xs1);
+	let xs3 : list[B $post @prover] = [true,false,true,true];
+	let xs4 = reverse(xs3);
+	let xs5 : list[tuple[B $post @prover, U $post @prover]] =
+		for i in 0 .. length(xs1) {
+			(xs3[i],xs1[i])
+		};
+	let xs6 = reverse(xs5);
+	let mut xs7 = xs6;
+	mut_reverse(ref xs7);
+	mut_reverse(ref xs7);
+	mut_reverse(ref xs7);
+	for i in 0 .. length(xs3) {
+		assert_zero((xs3[i] as uint[2]) - (xs7[i].0 as uint[2]));
+		assert_zero(xs1[i] - xs7[i].1);
+		{}
+	}
+	{}
+}

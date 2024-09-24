@@ -1,0 +1,672 @@
+use FixedPoint::*;
+use NewFixpElemfuns::*;
+use ConvertUtil::*;
+use Bitextract::*;
+use Inequalities::*;
+use Store::*;
+use Std::*;
+use Integer::*;
+use fixed_floor_and_frac::*;
+
+struct Interval[N : Nat, $S, @D] {
+  lo : Fixed[N, $S, @D],
+  hi : Fixed[N, $S, @D]
+}
+
+fn interval_convert[N : Nat, $S1, $S2, @D1, @D2](q : Interval[N, $S1, @D1]) -> Interval[N, $S2, @D2]
+where Field[N], @D1 <= @D2
+{
+  Interval {
+    lo: fixed_convert(q.lo),
+    hi: fixed_convert(q.hi)
+  }
+}
+
+pub fn interval_cond[M : Nat, N : Nat, $S, @D](b : bool[M] $S @D, x : Interval[N, $S, @D], y : Interval[N, $S, @D]) -> Interval[N, $S, @D]
+  where Field[N], Convertible[M,N] {
+    Interval {
+      lo: fixed_cond(b, x.lo, y.lo),
+      hi: fixed_cond(b, x.hi, y.hi)
+    }
+} 
+
+struct Box[N : Nat, $S, @D] {
+  x : Interval[N, $S, @D],
+  y : Interval[N, $S, @D]
+}
+
+fn box_convert[N : Nat, $S1, $S2, @D1, @D2](q : Box[N, $S1, @D1]) -> Box[N, $S2, @D2]
+where Field[N], @D1 <= @D2 {
+  Box {
+    x: interval_convert(q.x),
+    y: interval_convert(q.y)
+  }
+}
+
+pub struct AlgFuncParameters[N : Nat] {
+  function_name: string $pre @public,
+  len: u64 $pre @public,
+  pplen: u64 $pre @public,
+  coefs: list[list[Fixed[N, $pre, @public]]],
+  max_error: Fixed[N, $pre, @public],
+  box_cover: list[Box[N, $pre, @public]],
+  domain_bounds: Interval[N, $pre, @public],
+  lowerlimit_store: Store[N, $post, @prover], // box.y.lo
+  upperlimit_store: Store[N, $post, @prover], // box.y.hi
+  left_edge_store: Store[N, $post, @prover], // box.x.lo
+  right_edge_store: Store[N, $post, @prover] // box.x.hi
+  // perhaps all the stores should be combined into one with clever indexing
+}
+
+struct PreAlgFuncParameters {
+    function_name: string $pre @public,
+    len: u64 $pre @public,
+    pplen: u64 $pre @public,
+    coefs: list[list[Fixed[inf, $pre, @public]]],
+    max_error: Fixed[inf, $pre, @public],
+    box_cover: list[Box[inf, $pre, @public]],
+    domain_bounds: Interval[inf, $pre, @public],
+}
+
+pub fn fake_alg_coefs[N : Nat](xd: u64 $pre @public, yd: u64 $pre @public, len: u64 $pre @public, pplen: u64 $pre @public)
+-> list[list[Fixed[N, $pre, @public]]]
+where Field[N]
+{
+  let mut coefs = for i in 0..(xd+1) {
+    for j in 0..(yd+1) {
+      Fixed {coef: 0, len: len, pplen: pplen}
+  }};
+  coefs[1][0] = uint_to_fixed(1, len, pplen);
+  coefs[0][1] = negate_fixed(uint_to_fixed(1, len, pplen));
+  coefs
+}
+
+pub fn fake_poly_coefs[N : Nat](degree: u64 $pre @public, len: u64 $pre @public, pplen: u64 $pre @public)
+-> list[Fixed[N, $pre, @public]]
+where Field[N]
+{
+  let mut coefs = for i in 0..(degree+1) {
+      Fixed {coef: 0, len: len, pplen: pplen}
+  };
+  coefs[1] = uint_to_fixed(1, len, pplen);
+  coefs
+}
+
+fn minimal_length(x: Fixed[inf, $pre, @public]) -> u64 $pre @public
+{
+  let s = if (x.coef == 0) {
+    0
+  } else if (x.coef < 0) {
+    (log2(-x.coef-1) as u64) + 2
+  } else {
+    (log2(x.coef) as u64) + 2
+  };
+  max_pre(x.pplen + 2, s)
+}
+
+fn interval_minimal_length(i: Interval[inf, $pre, @public]) -> u64 $pre @public
+{
+  max_pre(minimal_length(i.lo), minimal_length(i.hi))
+}
+
+fn box_minimal_length(b: Box[inf, $pre, @public]) -> u64 $pre @public
+{
+  max_pre(interval_minimal_length(b.x), interval_minimal_length(b.y))
+}
+
+fn params_minimal_length(pp: PreAlgFuncParameters) -> u64 $pre @public
+{
+  let mut mz = 0;
+  for i in 0..length(pp.coefs) {
+    for j in 0..length(pp.coefs[i]) {
+      mz = max_pre(mz, minimal_length(pp.coefs[i][j]))
+    };
+  };
+  mz = max_pre(mz, minimal_length(pp.max_error));
+  for i in 0..length(pp.box_cover) {
+    mz = max_pre(mz, box_minimal_length(pp.box_cover[i]))
+  };
+  mz = max_pre(mz, interval_minimal_length(pp.domain_bounds));
+  mz
+}
+
+pub fn cook_parameters[N : Nat](pre_params: PreAlgFuncParameters, len: u64 $pre @public, pplen: u64 $pre @public)
+-> AlgFuncParameters[N]
+where Field[N]
+{
+  let mut lowerlimit_store = store_new(true, true, false);
+  let mut upperlimit_store = store_new(true, true, false);
+  let mut left_edge_store = store_new(true, true, false);
+  let mut right_edge_store = store_new(true, true, false);
+
+  let ml = params_minimal_length(pre_params);
+  let lp_diff = ml - pre_params.pplen;
+  let new_diff = len - pplen;
+  dbg_assert(lp_diff <= new_diff);
+
+  let new_coefs = for i in 0..length(pre_params.coefs) {
+    for j in 0..length(pre_params.coefs[i]) {
+      adjust_const_pre(pre_params.coefs[i][j], len, pplen)
+    }
+  };
+  let new_max_error = adjust_const_pre(pre_params.max_error, len, pplen);
+  let new_box_cover: list[Box[N, $pre, @public]] = for i in 0..length(pre_params.box_cover) {
+    adjust_box_pre(pre_params.box_cover[i], len, pplen)
+  };
+
+  for i in 0..length(new_box_cover) {
+    Store_set(ref lowerlimit_store, uint_convert(i as uint[N]), uint_convert(new_box_cover[i].y.lo.coef));
+    Store_set(ref upperlimit_store, uint_convert(i as uint[N]), uint_convert(new_box_cover[i].y.hi.coef));
+    Store_set(ref left_edge_store, uint_convert(i as uint[N]), uint_convert(new_box_cover[i].x.lo.coef));
+    Store_set(ref right_edge_store, uint_convert(i as uint[N]), uint_convert(new_box_cover[i].x.hi.coef));
+  };
+
+  let new_domain_bounds = adjust_interval_pre(pre_params.domain_bounds, len, pplen);
+
+  AlgFuncParameters {
+    function_name: pre_params.function_name,
+    len: len,
+    pplen: pplen,
+    coefs: new_coefs,
+    max_error: new_max_error,
+    box_cover: new_box_cover,
+    domain_bounds: new_domain_bounds,
+    lowerlimit_store: lowerlimit_store,
+    upperlimit_store: upperlimit_store,
+    left_edge_store: left_edge_store,
+    right_edge_store: right_edge_store
+  }
+}
+
+fn find_box[N : Nat, $S, @D](
+  ref params: AlgFuncParameters[N],
+  x: Fixed[N, $S, @D],
+  ref sizeasserters: list[SizeAsserter[N, $S, @D]]
+)
+-> Box[N, $S, @D]
+where Field[N]
+{
+  let x_pre = fixed_pre(x);
+  let mut lo: u64 $pre @D = 0;
+  let mut hi: u64 $pre @D = length(params.box_cover) as @D;
+  while (hi - lo > 1) {
+    let mid = (lo + hi)/2;
+    let pivot = (params.box_cover as @D)[mid].x.lo;
+    if lt_fixed(x_pre, pivot) {
+      hi = mid;
+    } else {
+      lo = mid;
+    }
+  }
+  let box_index: u64 $pre @D = lo;
+  univ_assert(le_fixed((params.box_cover as @D)[box_index].x.lo, x_pre));
+  univ_assert(le_fixed(x_pre, (params.box_cover as @D)[box_index].x.hi));
+
+  // TODO: maybe some size assertion on the modulus here, relating to box_index as uint[N]?
+  // Possibly we do this assertion on construction of the parameters instead.
+  let strange_signature_box: Box[N, $pre, @D] @D = (params.box_cover as @D)[box_index];
+  let prebox: Box[N, $pre, @D] = Box {
+    x: strange_signature_box.x,
+    y: strange_signature_box.y
+  };
+  if (post $S) {
+    if (@prover <= @D) {
+      // here's the only place where we need the store, since we need to make sure
+      // the y-s are actually related to the x
+      let post_index: uint[N] $post @prover = uint_downcast(box_index as uint[N]);
+
+      let xl_coef = Store_get(ref params.left_edge_store, post_index);
+      let xr_coef = Store_get(ref params.right_edge_store, post_index);
+      let yl_coef = Store_get(ref params.lowerlimit_store, post_index);
+      let yh_coef = Store_get(ref params.upperlimit_store, post_index);
+
+      let xl = Fixed {coef: xl_coef, pplen: params.pplen, len: params.len};
+      let xr = Fixed {coef: xr_coef, pplen: params.pplen, len: params.len};
+      let yl = Fixed {coef: yl_coef, pplen: params.pplen, len: params.len};
+      let yh = Fixed {coef: yh_coef, pplen: params.pplen, len: params.len};
+
+      assert(le_fixed3(xl, x, ref sizeasserters));
+      assert(le_fixed3(x, xr, ref sizeasserters));
+
+      let x = Interval {lo:xl, hi:xr};
+      let y = Interval {lo:yl, hi:yh};
+      Box {x:x, y:y}
+    } else {
+      box_convert(prebox)
+    }
+  } else {
+    prebox
+  }
+}
+
+// right shift in the sense of x >> k, so big endian
+// 4 >> 1 == 2
+// supports negative shift counts, results in positive left shift
+fn shift_right[@D](coef: uint $pre @D, count: u64 $pre @public) -> uint $pre @D
+{
+  if count > 0 {
+    let divisor = pow_pre_inf(2, count);
+    coef/divisor
+  } else {
+    let multiplier = pow_pre_inf(2, -count);
+    coef * multiplier
+  }
+}
+
+pub fn shift_right_roundup[@D](coef: uint $pre @D, count: u64 $pre @public) ->
+uint $pre @D
+{
+  if count > 0 {
+    let divisor = pow_pre_inf(2, count);
+    -((-coef)/divisor)
+  } else {
+    let multiplier = pow_pre_inf(2, -count);
+    coef * multiplier
+  }
+}
+
+fn adjust_const_pre[N : Nat](c: Fixed[inf, $pre, @public], len: u64 $pre @public, pplen: u64 $pre @public) -> Fixed[N, $pre, @public]
+{
+  let infcoef = shift_right(c.coef, c.pplen - pplen);
+  let halftop = pow_pre_inf(2, len-1);
+  dbg_assert((0 <= infcoef + halftop) & (infcoef + halftop < 2*halftop));
+  Fixed { coef: infcoef as uint[N], pplen: pplen, len: len}
+}
+
+fn adjust_interval_pre[N : Nat](i: Interval[inf, $pre, @public], len: u64 $pre @public, pplen: u64 $pre @public)
+-> Interval[N, $pre, @public]
+{
+  Interval {
+    lo: adjust_const_pre(i.lo, len, pplen),
+    hi: adjust_const_pre(i.hi, len, pplen)
+  }
+}
+
+fn adjust_box_pre[N : Nat](b: Box[inf, $pre, @public], len: u64 $pre @public, pplen: u64 $pre @public)
+-> Box[N, $pre, @public]
+{
+  Box {
+    x: adjust_interval_pre(b.x, len, pplen),
+    y: adjust_interval_pre(b.y, len, pplen)
+  }
+}
+
+fn adjust_const_to_model[N: Nat, $S, @D](constant: Fixed[inf, $pre, @public], model: Fixed[N, $S, @D]) -> Fixed[N, $S, @D]
+where Field[N]
+{
+  let shifted_const_coef: uint[N] $pre @public = shift_right(constant.coef, constant.pplen - model.pplen) as uint[N];
+  fixed_convert(Fixed { coef: shifted_const_coef, pplen: model.pplen, len: model.len })
+}
+
+fn adjust_inf_const_roundup[@D](c: Fixed[inf, $pre, @D], pplen: u64 $pre @public)
+-> Fixed[inf, $pre, @D]
+{
+  let shifted_coef = shift_right_roundup(c.coef, c.pplen - pplen);
+  Fixed {coef:shifted_coef, pplen: pplen, len: -1}
+}
+
+// RANGE REDUCTIONS
+fn fixed_sin_quarter[N: Nat, $S, @D](
+  params: AlgFuncParameters[N],
+  x: Fixed[N, $S, @D],
+  ref sizeasserters: list[SizeAsserter[N, $S, @D]]
+) -> Fixed[N, $S, @D]
+where Field[N]
+{
+  let x_parts = fixed_floor_and_frac(x, ref sizeasserters);
+  let quadrant_parts = quot_rem3(x_parts.0, 4, ref sizeasserters[x.len - x.pplen]);
+  let remainder_bits: bitarray[$S, @D, N] = bitextract(quadrant_parts.1, 2);
+  let one: Fixed[N, $S, @D] = fixed_convert(uint_to_fixed(1: uint[N] $pre @public, x.len, x.pplen));
+  let input_val = fixed_cond(remainder_bits[0], sub_fixed3(one, x_parts.1, ref sizeasserters), x_parts.1);
+  let unsigned_out_val = keyrange_eval(params, input_val, ref sizeasserters);
+  fixed_cond(remainder_bits[1], negate_fixed(unsigned_out_val), unsigned_out_val)
+}
+
+fn fixed_cos_quarter[N: Nat, $S, @D](
+  params: AlgFuncParameters[N],
+  x: Fixed[N, $S, @D],
+  ref sizeasserters: list[SizeAsserter[N, $S, @D]]
+) -> Fixed[N, $S, @D]
+where Field[N]
+{
+  let one_minus_x = sub_fixed3(fixed_convert(uint_to_fixed(1 : uint[N] $pre @public, x.len, x.pplen)), x, ref sizeasserters);
+  fixed_sin_quarter(params, one_minus_x, ref sizeasserters)
+}
+
+pub fn fixed_sin[N : Nat, $S, @D](
+  params: AlgFuncParameters[N],
+  x: Fixed[N, $S, @D],
+  ref sizeasserters: list[SizeAsserter[N, $S, @D]]
+) -> Fixed[N, $S, @D]
+where Field[N]
+{
+  let adjusted_two_over_pi = adjust_const_to_model(two_over_pi(), x);
+  let rescaled_x = mult_fixed3(adjusted_two_over_pi, x, ref sizeasserters);
+  fixed_sin_quarter(params, rescaled_x, ref sizeasserters)
+}
+
+// Could be made a bit faster in $pre by specializing
+fn fixed_exp2_integral[N: Nat, $S, @D](
+  x : uint[N] $S @D,
+  len: u64 $pre @public,
+  pplen: u64 $pre @public,
+  ref sizeasserters: list[SizeAsserter[N, $S, @D]]
+) -> Fixed[N, $S, @D]
+where Field[N]
+{
+  let casted_pplen: uint[N] $S @D = if (post $S) {pplen as uint[N] as $post as @D} else {pplen as uint[N] as $pre as @D};
+  let biased_x = x + casted_pplen;
+  let biased_x_fix = fixed3(biased_x, len, pplen, ref sizeasserters);
+  let zero = fixed_convert(fixed(0: uint[N] $pre @public, len, pplen));
+  let zero_le_biased_x = le_fixed3(zero, biased_x_fix, ref sizeasserters);
+  let bw_pplen = (log2(pplen as uint) as u64) +1;
+  let safe_input = uint_cond(zero_le_biased_x, biased_x, 0);
+  let safe_result = pow(2, safe_input, max_pre(len-pplen, bw_pplen)+1);
+  let out_coef = uint_cond(zero_le_biased_x, safe_result, 0);
+
+  fixed3(out_coef, len, pplen, ref sizeasserters)
+}
+
+pub fn fixed_exp2[N: Nat, $S, @D](
+  params: AlgFuncParameters[N],
+  x : Fixed[N, $S, @D],
+  ref sizeasserters: list[SizeAsserter[N, $S, @D]]
+) -> Fixed[N, $S, @D]
+where Field[N]
+{
+  let parts = fixed_floor_and_frac(x, ref sizeasserters);
+  dbg_print("parts":string);
+  dbg_print(to_string(parts.0 as $pre));
+  dbg_print(fixed_to_string(parts.1));
+  let integral_pow: Fixed[N, $S, @D] = fixed_exp2_integral(parts.0, parts.1.len, parts.1.pplen, ref sizeasserters);
+  let fractional_pow: Fixed[N, $S, @D] = keyrange_eval(params, parts.1, ref sizeasserters);
+  dbg_print("fractional_pow":string);
+  dbg_print(fixed_to_string(fractional_pow));
+  mult_fixed3(integral_pow, fractional_pow, ref sizeasserters)
+}
+
+pub fn fixed_exp[N : Nat, $S, @D](
+  params: AlgFuncParameters[N],
+  x : Fixed[N, $S, @D],
+  ref sizeasserters: list[SizeAsserter[N, $S, @D]]
+) -> Fixed[N, $S, @D]
+where Field[N]
+{
+  let adjusted_log2e = adjust_const_to_model(log2e(), x);
+  let scaled_input = mult_fixed3(x, adjusted_log2e, ref sizeasserters);
+  fixed_exp2(params, scaled_input, ref sizeasserters)
+}
+
+struct ScaleRep[N : Nat, $S, @D] {
+  exponent: uint[N] $S @D,
+  significand: Fixed[N, $S, @D]
+}
+
+// must already know that msb is a power of 2
+// some assumption about modulus size and msb, should think through later
+fn check_msb[N : Nat, $S, @D](x: uint[N] $S @D, msb: uint[N] $S @D, ref sizeasserter: SizeAsserter[N, $S, @D])
+-> bool[N] $S @D
+where Field[N]
+{
+  let diff = x - msb;
+  le3(0, diff, ref sizeasserter) & lt3(diff, msb, ref sizeasserter)
+}
+
+// assumes x.coef > 0 in the signed_uintN sense of FastFixedPoint
+fn rescale[N : Nat, $S, @D](x : Fixed[N, $S, @D], ref sizeasserters: list[SizeAsserter[N, $S, @D]])
+-> ScaleRep[N, $S, @D]
+where Field[N]
+{
+  // x = significand * 2^exponent
+  // exponent = kp - x.pplen
+  let kp: uint[N] $pre @D = log2(x.coef as $pre as uint) as uint[N];
+  let casted_kp: uint[N] $S @D = if (post $S) {wire{kp}} else {kp};
+  let casted_pp: uint[N] $S @D = if (post $S) {(wire{x.pplen as uint[N]}) as @D} else {x.pplen as uint[N] as @D};
+  let msb: uint[N] $S @D = pow(2, casted_kp, x.len);
+  dbg_print(fixed_to_string(x));
+  dbg_print(to_string(x.coef as $pre));
+  dbg_print(to_string(kp));
+  dbg_print(to_string(msb as $pre));
+  dbg_print(to_string(x.len));
+  dbg_print(to_string(casted_kp as $pre - casted_pp as $pre));
+  univ_assert(check_msb(x.coef, msb, ref sizeasserters[x.len]));
+  let divisor = fixed3(msb, x.len, x.pplen, ref sizeasserters);
+  let q = div_fixed3(x, divisor, ref sizeasserters);
+  ScaleRep {
+    exponent: casted_kp - casted_pp,
+    significand: q
+  }
+}
+
+// params should be for log2_shifted
+pub fn fixed_log2[N: Nat, $S, @D](
+  params: AlgFuncParameters[N],
+  x: Fixed[N, $S, @D],
+  ref sizeasserters: list[SizeAsserter[N, $S, @D]]
+) -> Fixed[N, $S, @D]
+where Field[N]
+{
+  let sr = rescale(x, ref sizeasserters);
+  let one = fixed_convert(uint_to_fixed(1: uint[N] $pre @public, x.len, x.pplen));
+  let exp_fix = uint_to_fixed3(sr.exponent, x.len, x.pplen, ref sizeasserters);
+  add_fixed3(keyrange_eval(params, sub_fixed3(sr.significand, one, ref sizeasserters), ref sizeasserters), exp_fix, ref sizeasserters)
+}
+
+pub fn fixed_ln[N: Nat, $S, @D](params: AlgFuncParameters[N], x: Fixed[N, $S, @D], ref sizeasserters: list[SizeAsserter[N, $S, @D]]) -> Fixed[N, $S, @D]
+where Field[N]
+{
+  let kln2: Fixed[inf, $pre, @public] = ln2();
+  let adjusted_kln2 = adjust_const_to_model(kln2, x);
+  let unscaled_output = fixed_log2(params, x, ref sizeasserters);
+  let scaled_output = mult_fixed3(unscaled_output, adjusted_kln2, ref sizeasserters);
+  scaled_output
+}
+
+pub fn fixed_log10[N: Nat, $S, @D](params: AlgFuncParameters[N], x: Fixed[N, $S, @D], ref sizeasserters: list[SizeAsserter[N, $S, @D]]) -> Fixed[N, $S, @D]
+where Field[N]
+{
+  let adjusted_log10_2 = adjust_const_to_model(log10_2(), x);
+  let unscaled_output = fixed_log2(params, x, ref sizeasserters);
+  let scaled_output = mult_fixed3(unscaled_output, adjusted_log10_2, ref sizeasserters);
+  scaled_output
+}
+
+// Computes the log2_erfc_scaled function, defined in ePrint 2024/859
+pub fn fixed_log2_erfc_scaled[N: Nat, $S, @D](params: AlgFuncParameters[N], x: Fixed[N, $S, @D], ref sizeasserters: list[SizeAsserter[N, $S, @D]])
+-> Fixed[N, $S, @D]
+where Field[N]
+{
+  let hi_domain_unscaled = params.domain_bounds.hi;
+  let eight = uint_to_fixed(8, x.len, x.pplen);
+  let hi_domain = mult_fixed(eight, hi_domain_unscaled);
+  let conv_hi_domain = fixed_convert(hi_domain);
+  let zero = fixed_convert(uint_to_fixed(0: uint[N] $pre @public, x.len, x.pplen));
+  let x_lt_zero = lt_fixed3(x, zero, ref sizeasserters);
+  let abs_x = Fixed {
+    coef: uint_cond(x_lt_zero, -x.coef, x.coef),
+    len: x.len,
+    pplen: x.pplen
+  };
+  let abs_x_le_hi = le_fixed3(abs_x, conv_hi_domain, ref sizeasserters);
+  let safe_pos_input = fixed_cond(abs_x_le_hi, abs_x, conv_hi_domain);
+  let safe_pos_output = keyrange_eval(params, safe_pos_input, ref sizeasserters);
+  let two = fixed_convert(uint_to_fixed(2: uint[N] $pre @public, x.len, x.pplen));
+  let nice_pos_output = fixed_cond(abs_x_le_hi, safe_pos_output, zero);
+  let nice_output = fixed_cond(x_lt_zero, sub_fixed3(two, nice_pos_output, ref sizeasserters), nice_pos_output);
+  nice_output
+}
+
+pub fn fixed_arcsin[N : Nat, $S, @D](params: AlgFuncParameters[N], x: Fixed[N, $S, @D], ref sizeasserters: list[SizeAsserter[N, $S, @D]]) -> Fixed[N, $S, @D]
+where Field[N]
+{
+  let adjusted_sqrt2_over_2 = adjust_const_to_model(sqrt2_over_2(), x);
+  let adjusted_pi_over_2 = adjust_const_to_model(pi_over_two(), x);
+
+  let sign_x: bool[N] $S @D = lt_fixed3(x, fixed_convert(uint_to_fixed(0,x.len,x.pplen): Fixed[N, $pre, @public]), ref sizeasserters);
+  let abs_x: Fixed[N, $S, @D] = fixed_cond(sign_x, negate_fixed(x), x);
+
+  let arccos_arg: Fixed[N, $S, @D] = sqrt_fixed3(
+    sub_fixed3(
+      fixed_convert(uint_to_fixed(1: uint[N] $pre @public, x.len, x.pplen)),
+      mult_fixed3(abs_x, abs_x, ref sizeasserters),
+      ref sizeasserters
+    ),
+    ref sizeasserters
+  );
+  let in_regular_region = le_fixed3(abs_x, adjusted_sqrt2_over_2, ref sizeasserters);
+
+  let corrected_abs_arg = fixed_cond(in_regular_region, abs_x, arccos_arg);
+
+  let inner_arcsin = keyrange_eval(params, corrected_abs_arg, ref sizeasserters);
+  let abs_res = fixed_cond(in_regular_region, inner_arcsin, sub_fixed3(adjusted_pi_over_2, inner_arcsin, ref sizeasserters));
+
+  let res = fixed_cond(sign_x, negate_fixed(abs_res), abs_res);
+
+  res
+}
+
+pub fn fixed_arccos[N : Nat, $S, @D](params: AlgFuncParameters[N], x: Fixed[N, $S, @D], ref sizeasserters: list[SizeAsserter[N, $S, @D]]) -> Fixed[N, $S, @D]
+where Field[N]
+{
+  sub_fixed3(adjust_const_to_model(pi_over_two(), x), fixed_arcsin(params, x, ref sizeasserters), ref sizeasserters)
+}
+
+// GENERAL EVALUATION
+fn keyrange_eval[N : Nat, $S, @D](params: AlgFuncParameters[N], x: Fixed[N, $S, @D], ref sizeasserters: list[SizeAsserter[N, $S, @D]]) -> Fixed[N, $S, @D]
+where Field[N]
+{
+  let mut mutpar = params;
+  let box = find_box(ref mutpar, x, ref sizeasserters);
+  implicit_algebraic_function_fixed(x, params.coefs, box.y.lo, box.y.hi, ref sizeasserters)
+}
+
+// CONSTANTS
+fn two_over_pi() -> Fixed[inf, $pre, @public] {
+  Fixed {
+    coef: 73715533492226901901836098385759174607297965327747686705228263945774433027426,
+    len: -1,
+    pplen: 256
+  }
+}
+
+fn pi_over_two() -> Fixed[inf, $pre, @public] {
+  Fixed {
+    coef: 90942894222941581070058735694432465663348344332098107489693037779484723616546,
+    len: -1,
+    pplen: 255
+  }
+}
+
+fn ln2() -> Fixed[inf, $pre, @public] {
+  Fixed {
+    coef: 80260960185991308862233904206310070533990667611589946606122867505419956976172,
+    len: -1,
+    pplen: 256
+  }
+}
+
+fn log10_2() -> Fixed[inf, $pre, @public] {
+  Fixed {
+    coef: 69713784242065235859731431401860835993006968737907191171088693192681161778123,
+    len: -1,
+    pplen: 257
+  }
+}
+
+fn log2e() -> Fixed[inf, $pre, @public] {
+  Fixed {
+    coef: 83526336458424194121492813280623765993638341316565525075423201372268130284104,
+    len: -1,
+    pplen: 255
+  }
+}
+
+fn sqrt2_over_2() -> Fixed[inf, $pre, @public] {
+  Fixed {
+    coef: 81877371507464127617551201542979628307507432471243237061821853600756754782485,
+    len: -1,
+    pplen: 256
+  }
+}
+
+type FlatFixed: Qualified = list[uint $pre @public] $pre @public;
+type FlatInterval: Qualified = list[FlatFixed] $pre @public;
+type FlatBox: Qualified = list[FlatInterval] $pre @public;
+type FlatCoefs: Qualified = list[list[FlatFixed] $pre @public] $pre @public;
+type FlatBoxCover: Qualified = list[FlatBox] $pre @public;
+
+fn reconstruct_fixed(s: FlatFixed) -> Fixed[inf, $pre, @public] {
+  Fixed { coef: s[0], len: s[1] as u64, pplen: s[2] as u64 }
+}
+
+fn reconstruct_interval(s: FlatInterval) -> Interval[inf, $pre, @public] {
+  Interval { lo: reconstruct_fixed(s[0]), hi: reconstruct_fixed(s[1]) }
+}
+
+fn reconstruct_box(s: FlatBox) -> Box[inf, $pre, @public] {
+  Box { x: reconstruct_interval(s[0]), y: reconstruct_interval(s[1]) }
+}
+
+fn reconstruct_coefs(s: FlatCoefs) -> list[list[Fixed[inf, $pre, @public]]] {
+  for i in 0..length(s) {
+    for j in 0..length(s[i]) {
+      reconstruct_fixed(s[i][j])
+    }
+  }
+}
+
+fn reconstruct_cover(s: FlatBoxCover) -> list[Box[inf, $pre, @public]] {
+  for i in 0..length(s) { reconstruct_box(s[i]) }
+}
+
+fn le_fixed_inf[@D](x: Fixed[inf, $pre, @D], y: Fixed[inf, $pre, @D]) -> bool $pre @D
+{
+  //? dbg_assert(x.len == y.len);
+  dbg_assert(x.pplen == y.pplen);
+  x.coef <= y.coef
+}
+
+fn get_pre_params(funcname: string, max_error: Fixed[inf, $pre, @public])
+-> PreAlgFuncParameters
+{
+  let lens: list[u64 $pre @public] = get_public(funcname ++ "_len");
+  let pplens: list[u64 $pre @public] = get_public(funcname ++ "_pplen");
+  let flat_coefss: list[FlatCoefs] = get_public(funcname ++ "_coefs");
+  let flat_max_errors: list[FlatFixed] = get_public(funcname ++ "_max_error");
+  let flat_box_covers: list[FlatBoxCover] = get_public(funcname ++ "_box_cover");
+  let flat_domain_boundss: list[FlatInterval] = get_public(funcname ++ "_domain_bounds");
+
+
+  let coefss = for i in 0..length(flat_coefss) {reconstruct_coefs(flat_coefss[i])};
+  let max_errors = for i in 0..length(flat_max_errors) {reconstruct_fixed(flat_max_errors[i])};
+  let box_covers = for i in 0..length(flat_box_covers) { reconstruct_cover(flat_box_covers[i])};
+  let domain_boundss = for i in 0..length(flat_domain_boundss) { reconstruct_interval(flat_domain_boundss[i])};
+
+  let mut index: u64 $pre @public = -1;
+  for i in 0..length(max_errors) {
+    let comparable_max_error = adjust_inf_const_roundup(max_errors[i], max_error.pplen);
+    if le_fixed_inf(comparable_max_error, max_error) { index = i; break; }
+  }
+  dbg_assert(index >= 0);
+  
+  PreAlgFuncParameters {
+    function_name: funcname,
+    len: lens[index],
+    pplen: pplens[index],
+    coefs: coefss[index],
+    max_error: max_errors[index],
+    domain_bounds: domain_boundss[index],
+    box_cover: box_covers[index]
+  }
+}
+
+pub fn get_params[N : Nat](funcname: string, max_error: Fixed[N, $pre, @public])
+-> AlgFuncParameters[N]
+where Field[N]
+{
+  let half_len = pow_pre_inf(2, max_error.len - 1);
+  let max_error_coef: uint $pre @public = ((max_error.coef + (half_len as uint[N])) as uint) - half_len;
+  let max_error_inf = Fixed { coef:max_error_coef, len:-1, pplen:max_error.pplen};
+  cook_parameters(get_pre_params(funcname, max_error_inf), max_error.len, max_error.pplen)
+}
+

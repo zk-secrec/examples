@@ -1,0 +1,17 @@
+// type N : Nat = 1030307;
+type N : Nat = 0x1fffffffffffffff;
+
+fn cube(x : uint[N] $post @prover) -> uint[N] @prover {
+    let a = 1;
+    let b = a * x;
+    let c = b * x;
+    let d = c * x;
+    d
+}
+
+fn main() where Field[N] {
+    let z = wire { get_instance("z") };
+    let x = wire { get_witness("x") };
+    let y = cube(x);
+    assert_zero(y - (z as @prover));
+}

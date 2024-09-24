@@ -1,0 +1,15 @@
+struct Pair {
+    x : uint[31] $post @prover,
+    y : uint[31] $post @prover,
+}
+
+sieve fn f(pair : Pair) -> Pair {
+    Pair { x : pair.x + 5, y : pair.y + 6 }
+}
+
+fn main() where Vectorization {
+    let xs : arr[Pair] = freeze([Pair { x : 3, y : 4 }, Pair { x : 6, y : 1 }]);
+    let ys : arr[Pair] = zip pair in xs with {
+        Pair{ x : pair.x + 2, y : pair.y + 3 } };
+    let zs : arr[Pair] = f.(xs);
+}

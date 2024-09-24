@@ -1,0 +1,58 @@
+use Std::*;
+use Integer::*;
+use FixedPoint::*;
+use Inequalities::*;
+use Coord::*;
+use FG::*;
+
+pub type Triangle[N : Nat, $S, @D] : Qualified = tuple[Coord[N, $S, @D], Coord[N, $S, @D], Coord[N, $S, @D]] $pre @public;
+
+// Cast a Triangle to $pre stage
+pub fn triangle_pre[N : Nat, $S, @D](triangle : Triangle[N, $S, @D]) -> Triangle[N, $pre, @D]
+    where Field[N] {
+    (
+        coord_pre(triangle.0),
+        coord_pre(triangle.1),
+        coord_pre(triangle.2)
+    )
+}
+
+// Cast a Triangle to @prover domain
+pub fn triangle_prover[N : Nat, $S, @D](triangle : Triangle[N, $S, @D]) -> Triangle[N, $S, @prover]
+    where Field[N] {
+    (
+        coord_prover(triangle.0),
+        coord_prover(triangle.1),
+        coord_prover(triangle.2)
+    )
+}
+
+// Calculate the doubled area of a given triangle, multiplied by 2^(2*pplen)
+// Note that we assume the points of the triangle have (unsigned) integer coordinates
+pub sieve fn triangle_area_doubled[N : Nat, @D](p0 : Coord[N, $post, @D], p1 : Coord[N, $post, @D], p2 : Coord[N, $post, @D]) -> uint[N] $post @D
+    where Field[N] {
+
+    let plus : uint[N] $post @D = p0.0.coef * p1.1.coef + p1.0.coef * p2.1.coef + p2.0.coef * p0.1.coef;
+    let minus : uint[N] $post @D = p0.0.coef * p2.1.coef + p1.0.coef * p0.1.coef + p2.0.coef * p1.1.coef;
+
+    // If p0, p1, p2 was a clockwise orientation, then plus - minus would be negative, so absolute value is needed
+    let bw : u64 $pre @public = p0.0.len * 2 + 2;
+    let unorient : bool[N] $post @D = less_than(plus, minus, bw);
+    uint_cond_sieve(unorient, minus - plus, plus - minus)
+}
+
+// Calculate the doubled area of a given triangle, multiplied by 2^(2*pplen)
+// Note that we assume the points of the triangle have (unsigned) integer coordinates
+pub fn triangle_area_doubled_pre[N : Nat, @D](p0 : Coord[N, $pre, @D], p1 : Coord[N, $pre, @D], p2 : Coord[N, $pre, @D]) -> uint[N] $pre @D
+    where Field[N] {
+
+    let plus : uint[N] $pre @D = p0.0.coef * p1.1.coef + p1.0.coef * p2.1.coef + p2.0.coef * p0.1.coef;
+    let minus : uint[N] $pre @D = p0.0.coef * p2.1.coef + p1.0.coef * p0.1.coef + p2.0.coef * p1.1.coef;
+
+    // If p0, p1, p2 was a clockwise orientation, then plus - minus would be negative, so absolute value is needed
+    if (plus - minus >= 0) {
+        plus - minus
+    } else {
+        minus - plus
+    }
+}

@@ -1,0 +1,11 @@
+<ngb-toast
+	*ngFor="let toast of toastService.toasts"
+	[class]="toast.classname"
+  [autohide]="false"
+  [header]="toast.header"
+	(hidden)="toastService.remove(toast)"
+>
+  <div style="white-space: pre-line">
+    {{ toast.text }}
+  </div>
+</ngb-toast>

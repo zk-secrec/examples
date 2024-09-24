@@ -1,0 +1,7 @@
+{
+    "face_num_rows": "150",
+    "face_num_columns": "150",
+    "data_len": "5614592",
+    "expected_outputs_len": "527148",
+    "check_expected_outputs": false
+}

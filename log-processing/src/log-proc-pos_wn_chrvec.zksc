@@ -1,0 +1,36 @@
+/* Log processing use case: Positive variant (proving that all given canaries occur in the given text)
+
+Features: Witness contains occurrence positions for each canary, only the right substring of the text is checked for each canary. As the positions are in Prover's domain, accessing by index is O(n).
+
+*/
+use Std::*;
+use ChrVec::*;
+
+type N : Nat = 2305843009213693951; // Must be greater than the length of any access log
+
+fn check_canary
+( text : list[uint[N] $post @prover]
+, ind : uint[N] $post @prover
+, canary : arr[uint[N] $post @prover]
+)
+where Field[N], Vectorization
+{ let m = length(canary)
+; let seg = freeze(segment(text, ind, m))
+; let diff : arr[uint[N] $post @prover] = canary -. seg
+; let res : arr[() $pre @public] = assert_zero.(diff) // for i in 0 .. m { assert_zero(diff[i]) }
+;
+}
+
+fn main()
+where Field[N], Vectorization
+{ let n = get_public("text_len")
+; let ms : list[u64 $pre @public] = get_public("canary_len_list")
+; let canaries_pre : list[list[uint[N] $pre @verifier] $pre @verifier] $pre @verifier = get_instance("canary_list")
+; let canaries = for i in 0 .. length(ms) { array_to_prover(pre_uint_list_to_post_array(canaries_pre[i as @verifier], ms[i])) }
+; let text_pre : list[uint[N] $pre @prover] $pre @prover = get_witness("text")
+; let text = for i in 0 .. n { wire { text_pre[i as @prover] } }
+; let ind_list_pre : list[uint[N] $pre @prover] $pre @prover = get_witness("text_pos_list")
+; let ind_list = for i in 0 .. length(ms) { wire { ind_list_pre[i as @prover] } }
+; for k in 0 .. length(ms) { check_canary(text, ind_list[k], canaries[k]) }
+;
+}

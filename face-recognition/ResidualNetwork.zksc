@@ -1,0 +1,1475 @@
+use FastFixedPoint::*;
+use Std::*;
+use Integer::*;
+use Vec::*;
+
+type N : Nat = 170141183460469231731687303715884105727; // 2^127-1
+
+type Num : Unqualified = Fixed[N, $post, @prover];
+type DataNum : Unqualified = Fixed[N, $pre, @verifier]; // may be changed to @public if weights are public rather that verifier
+type DataInt : Qualified = uint $pre @verifier; // may be changed to @public if weights are public rather that verifier
+
+fn fixed_len() -> u64 $pre @public {
+    45
+}
+
+fn fixed_pplen() -> u64 $pre @public {
+    35
+}
+
+fn round_down_fixed_vectorized(xs : list[Num], new_len : u64 $pre @public, new_pplen : u64 $pre @public) -> list[Num]
+  where Field[N], Vectorization {
+    let res = round_down_fixed_unsafe_vectorized(xs, new_len, new_pplen);
+    check_fixed_vectorized(res);
+    res
+}
+
+fn round_down_fixed_unsafe_vectorized(xs : list[Num], new_len : u64 $pre @public, new_pplen : u64 $pre @public) -> list[Num]
+  where Field[N], Vectorization {
+    let pplen = xs[0].pplen;
+    let num_bits_to_round = pplen - new_pplen;
+    let rounding_factor_pre_public = pow_pre_inf(2 : uint $pre @public, num_bits_to_round);
+    let rounding_factor_pre_prover = rounding_factor_pre_public as @prover;
+    let rounding_factor = (wire{rounding_factor_pre_public as uint[N]}) as @prover;
+    dbg_assert(num_bits_to_round >= 0);
+    let new_coefs =
+        for i in 0 .. length(xs) {
+            let x = xs[i];
+            dbg_assert(x.pplen == pplen);
+            let new_coef = wire{(signed_uintN_to_uint(x.coef as $pre) / rounding_factor_pre_prover) as uint[N]};
+            new_coef
+        };
+    let to_check =
+        for i in 0 .. length(xs) {
+            xs[i].coef - new_coefs[i] * rounding_factor
+        };
+    let trash = bitextract_uv(freeze(to_check), num_bits_to_round);
+    for i in 0 .. length(xs) {
+        Fixed {
+            coef : new_coefs[i],
+            len : new_len,
+            pplen : new_pplen
+        }
+    }
+}
+
+fn check_fixed_vectorized(xs : list[Num]) where Field[N], Vectorization {
+    let len = xs[0].len;
+    let pow2 = (wire{pow_pre(2 : uint[N] $pre @public, len-1)}) as @prover;
+    let to_check =
+        for i in 0 .. length(xs) {
+            let x = xs[i];
+            dbg_assert(x.len == len);
+            x.coef + pow2
+        };
+    let trash = bitextract_uv(freeze(to_check), len);
+}
+
+extern fn uint_n_pre_matrix_to_i128[N : Nat, @D](xss : list[list[uint[N] $pre @D]]) -> list[list[u128 $pre @D]];
+
+extern fn i128_pre_matrix_to_uint_n[N : Nat, @D](xss : list[list[u128 $pre @D]]) -> list[list[uint[N] $pre @D]];
+
+fn uint_n_pre_matrix_prod_i128[N : Nat, @D](rows : list[list[uint[N] $pre @D]], cols : list[list[uint[N] $pre @D]]) -> list[list[uint[N] $pre @D]] {
+    i128_pre_matrix_to_uint_n(uint_n_pre_matrix_prod(uint_n_pre_matrix_to_i128(rows), uint_n_pre_matrix_to_i128(cols)))
+}
+
+// the first matrix (rows) is given as a list of row vectors
+// the second matrix (cols) is given as a list of column vectors
+// the matrix product is returned as a list of rows
+fn uintN_vectorized_matrix_prod(rows : list[arr[uint[N] $post @prover]], cols : list[arr[uint[N] $post @prover]]) -> list[list[uint[N] $post @prover]] where Field[N], Vectorization {
+    dbg_print("uintN_vectorized_matrix_prod: pre1" : string $pre @public);
+    let k = length(rows[0]);
+    let rows_pre =
+        for i in 0 .. length(rows) {
+            for j in 0 .. k {
+                rows[i][j] as $pre
+            }
+        };
+    let cols_pre =
+        for i in 0 .. length(cols) {
+            for j in 0 .. k {
+                cols[i][j] as $pre
+            }
+        };
+    dbg_print("uintN_vectorized_matrix_prod: pre2" : string $pre @public);
+    let res_pre = uint_n_pre_matrix_prod_i128(rows_pre, cols_pre);
+
+    dbg_print("uintN_vectorized_matrix_prod: post" : string $pre @public);
+    let rows = make_unknown(rows);
+    let cols = make_unknown(cols);
+    let res_post =
+        for i in 0 .. length(rows) {
+            for j in 0 .. length(cols) {
+                scalar_prod_uv(rows[i], cols[j])
+            }
+        };
+    dbg_print("uintN_vectorized_matrix_prod: make_not_unknown" : string $pre @public);
+    let res =
+        for i in 0 .. length(rows) {
+            for j in 0 .. length(cols) {
+                make_not_unknown(res_post[i][j], res_pre[i][j])
+            }
+        };
+    dbg_print("uintN_vectorized_matrix_prod: end" : string $pre @public);
+    res
+}
+
+// the first matrix (rows) is given as a list of row vectors
+// the second matrix (rows2) is also given as a list of row vectors
+// the matrix product is returned as a list of rows
+fn uintN_vectorized_matrix_prod2(rows : list[arr[uint[N] $post @prover]], rows2 : list[arr[uint[N] $post @prover]]) -> list[list[uint[N] $post @prover]] where Field[N], Vectorization {
+    dbg_print("uintN_vectorized_matrix_prod2: pre1" : string $pre @public);
+    let k = length(rows[0]);
+    let nc = length(rows2[0]);
+    let rows_pre =
+        for i in 0 .. length(rows) {
+            for j in 0 .. k {
+                rows[i][j] as $pre
+            }
+        };
+    let cols_pre =
+        for i in 0 .. nc {
+            for j in 0 .. k {
+                rows2[j][i] as $pre
+            }
+        };
+    dbg_print("uintN_vectorized_matrix_prod2: pre2" : string $pre @public);
+    let res_pre = uint_n_pre_matrix_prod_i128(rows_pre, cols_pre);
+
+    dbg_print("uintN_vectorized_matrix_prod2: post" : string $pre @public);
+    let rows = make_unknown(rows);
+    let rows2 = make_unknown(rows2);
+    let empty_arr : arr[uint[N] $post @prover] = freeze([]);
+    let res_post =
+        for i in 0 .. length(rows) {
+            let row = rows[i];
+            let mut row_res : arr[uint[N] $post @prover] = empty_arr;
+            for j in 0 .. k {
+                let c = row[j];
+                let row2 = mul_uint_uv(c, rows2[j]);
+                if (j == 0) {
+                    row_res = row2;
+                } else {
+                    row_res = row_res +. row2;
+                }
+            }
+            row_res
+        };
+    dbg_print("uintN_vectorized_matrix_prod2: make_not_unknown" : string $pre @public);
+    let res =
+        for i in 0 .. length(rows) {
+            for j in 0 .. nc {
+                make_not_unknown(res_post[i][j], res_pre[i][j])
+            }
+        };
+    dbg_print("uintN_vectorized_matrix_prod2: end" : string $pre @public);
+    res
+}
+
+// the first matrix (rows) is given as a list of rows
+// the second matrix (cols) is given as a list of columns
+// the matrix product, with biases vector added to each column, is returned as a flattened list in row-major order
+fn fixed_matrix_prod_with_bias(rows : list[arr[uint[N] $post @prover]], cols : list[list[Num]], biases : list[Num]) -> list[Num] where Field[N], Vectorization {
+    dbg_print("fixed_matrix_prod_with_bias: freezing vectors" : string $pre @public);
+    let nr = length(rows);
+    let nc = length(cols);
+    let k = length(rows[0]);
+    let len = cols[0][0].len;
+    let pplen = cols[0][0].pplen;
+    let rs = rows;
+    let xss : list[list[uint[N] $post @prover]] =
+        if (nc < 128) {
+            let cs : list[arr[uint[N] $post @prover]] =
+                for i in 0 .. nc {
+                    let col = cols[i];
+                    dbg_assert(length(col) == k);
+                    let coefs =
+                        for j in 0 .. k {
+                            let x = col[j];
+                            dbg_assert(x.len == len);
+                            dbg_assert(x.pplen == pplen);
+                            x.coef
+                        };
+                    freeze(coefs)
+                };
+            let xss : list[list[uint[N] $post @prover]] = uintN_vectorized_matrix_prod(rs, cs);
+            xss
+        } else {
+            // if nc is large enough, it is more efficient to vectorize the rows of the second matrix rather than columns
+            let rs2 : list[arr[uint[N] $post @prover]] =
+                for i in 0 .. k {
+                    freeze(
+                        for j in 0 .. nc {
+                            if (i == 0) {
+                                dbg_assert(length(cols[j]) == k);
+                            }
+                            let x = cols[j][i];
+                            dbg_assert(x.len == len);
+                            dbg_assert(x.pplen == pplen);
+                            x.coef
+                        }
+                    )
+                };
+            uintN_vectorized_matrix_prod2(rs, rs2)
+        };
+    let len' = 2*len;
+    let pplen' = 2*pplen;
+    let bias_factor = (wire{pow_pre_inf(2 : uint $pre @public, pplen) as uint[N]}) as @prover;
+    dbg_assert(length(biases) == nr);
+    let mut result : list[Num] = [];
+    for i in 0 .. nr {
+        dbg_assert(biases[i].len == len);
+        dbg_assert(biases[i].pplen == pplen);
+        let bias = biases[i].coef;
+        for j in 0 .. nc {
+            let x =
+                Fixed {
+                    coef : xss[i][j] + biases[i].coef * bias_factor,
+                    len : len',
+                    pplen : pplen'
+                };
+            list_push(ref result, x);
+        }
+        {}
+    }
+    // using the unsafe version, assuming the check will be done in the following relu layer
+    round_down_fixed_unsafe_vectorized(result, len, pplen)
+}
+
+// leaved off the checks at the beginning and end, so that these can be done in a vectorized way elsewhere
+fn affine_fixed_unsafe(x : Fixed[N, $post, @prover], y : Fixed[N, $post, @prover], z : Fixed[N, $post, @prover]) -> Fixed[N, $post, @prover] where Field[N] {
+    // we need to check overflow here because it was omitted in the preceding convolutional layer
+    //check_fixed(x);
+    let a = mult_fixed_exact(x, y);
+    let z_shift = a.pplen - z.pplen;
+    let z_factor = (wire{pow_pre_inf(2 : uint $pre @public, z_shift) as uint[N]}) as @prover;
+    let z' = Fixed { coef : z.coef * z_factor, len : a.len, pplen : a.pplen };
+    let exact_result = add_fixed(a, z');
+    // using the unsafe version, assuming the check will be done in the following relu layer
+    //round_down_fixed_unsafe(exact_result, z.len, z.pplen)
+    exact_result
+}
+
+fn pre_uint_to_post_prover_fixed[@D](coef : uint $pre @D) -> Num where Field[N] {
+    fixed_prover(fixed(wire { coef as uint[N] }, fixed_len(), fixed_pplen()))
+}
+
+fn data_fixeds_to_post(raw : list[DataInt], n : u64 $pre @public) -> list[Num] where Vectorization {
+    dbg_assert(length(raw) == n);
+    let len = fixed_len();
+    let pplen = fixed_pplen();
+    let pow2_1 = pow_pre_inf(2 : uint $pre @verifier, len-1);
+    let coefs_pre : arr[uint[N] $pre @verifier] =
+        freeze(
+            for i in 0 .. n {
+                let x = raw[i];
+                dbg_assert(x < pow2_1);
+                dbg_assert(x + pow2_1 >= 0);
+                x as uint[N]
+            }
+        );
+    let coefs_post : arr[uint[N] $post @verifier] = array_to_post(coefs_pre);
+    for i in 0 .. n {
+        let x = coefs_post[i];
+        Fixed {
+            coef : x as @prover,
+            len : len,
+            pplen : pplen,
+        }
+    }
+}
+
+fn dataints_to_datanums(raw : list[DataInt], n : u64 $pre @public) -> list[DataNum] {
+    dbg_assert(length(raw) == n);
+    let len = fixed_len();
+    let pplen = fixed_pplen();
+    let pow2_1 = pow_pre_inf(2 : uint $pre @verifier, len-1);
+    for i in 0 .. n {
+        let x = raw[i];
+        dbg_assert(x < pow2_1);
+        dbg_assert(x + pow2_1 >= 0);
+        Fixed {
+            coef : x as uint[N],
+            len : len,
+            pplen : pplen,
+        }
+    }
+}
+
+fn check_dataints(raw : list[DataInt], n : u64 $pre @public) {
+    dbg_assert(length(raw) == n);
+    let len = fixed_len();
+    let pplen = fixed_pplen();
+    let pow2_1 = pow_pre_inf(2 : uint $pre @verifier, len-1);
+    for i in 0 .. n {
+        let x = raw[i];
+        dbg_assert(x < pow2_1);
+        dbg_assert(x + pow2_1 >= 0);
+    }
+    {}
+}
+
+fn get2d[T : Qualified](xs : list[T], n2 : u64 $pre @public, i1 : u64 $pre @public, i2 : u64 $pre @public) -> T {
+    xs[i1*n2 + i2]
+}
+
+fn get3d'[T : Qualified](xs : list[T], n2 : u64 $pre @public, n3 : u64 $pre @public, i1 : u64 $pre @public, i2 : u64 $pre @public, i3 : u64 $pre @public) -> T {
+    xs[(i1*n2 + i2)*n3 + i3]
+}
+
+fn get3d[T : Qualified](xs : list[T], def : T, n2 : u64 $pre @public, n3 : u64 $pre @public, i1 : u64 $pre @public, i2 : u64 $pre @public, i3 : u64 $pre @public) -> T {
+    // only i2 and i3 can be out of bounds
+    if (i3 < 0 | i3 >= n3 | i2 < 0 | i2 >= n2) {
+        def
+    } else {
+        xs[(i1*n2 + i2)*n3 + i3]
+    }
+}
+
+fn get3d''[T : Qualified](xs : list[T], def : T, n1 : u64 $pre @public, n2 : u64 $pre @public, n3 : u64 $pre @public, i1 : u64 $pre @public, i2 : u64 $pre @public, i3 : u64 $pre @public) -> T {
+    // in this version also i1 can be out of bounds
+    if (i1 < 0 | i1 >= n1 | i3 < 0 | i3 >= n3 | i2 < 0 | i2 >= n2) {
+        def
+    } else {
+        xs[(i1*n2 + i2)*n3 + i3]
+    }
+}
+
+fn conv_inputs[T : Qualified](xs : list[T], def : T, fnr : u64 $pre @public, fnc : u64 $pre @public, k : u64 $pre @public, nr : u64 $pre @public, nc : u64 $pre @public, r : u64 $pre @public, c : u64 $pre @public) -> list[T] {
+    let mut res : list[T] = [];
+    let fnr' = (fnr - 1) / 2;
+    let fnc' = (fnc - 1) / 2;
+    for i in 0 .. k {
+        for r0 in r .. r + 2*fnr' + 1 {
+            let r' = r0 - fnr';
+            for c0 in c .. c + 2*fnc' + 1 {
+                let c' = c0 - fnc';
+                // negative r' and c' will wrap to large positive and will still be out of bounds
+                list_push(ref res, get3d(xs, def, nr, nc, i, r', c'));
+            }
+            {}
+        }
+        {}
+    }
+    res
+}
+
+fn conv_weights(xs : list[uint $pre @verifier], filter_no : u64 $pre @public, filter_size : u64 $pre @public) -> arr[uint[N] $post @verifier] where Vectorization {
+    let i1 = filter_no * filter_size;
+    let i2 = i1 + filter_size;
+    array_to_post(freeze(for i in i1 .. i2 { xs[i] as uint[N] }))
+}
+
+struct Conv {
+    num_filters : u64 $pre @public,
+    filter_nr : u64 $pre @public,
+    filter_nc : u64 $pre @public,
+    stride : u64 $pre @public,
+    padding : u64 $pre @public
+}
+
+struct State {
+    inputs : list[Num],
+    input_k : u64 $pre @public,
+    input_nr : u64 $pre @public,
+    input_nc : u64 $pre @public,
+    data : list[DataInt],
+    data_i : u64 $pre @public,
+    data2 : list[DataInt],
+    data2_i : u64 $pre @public,
+    check_expected_outputs: bool $pre @public,
+    def : Num
+}
+
+struct SavedState {
+    inputs : list[Num],
+    input_k : u64 $pre @public,
+    input_nr : u64 $pre @public,
+    input_nc : u64 $pre @public
+}
+
+fn save_state(st : State) -> SavedState {
+    SavedState {
+        inputs : st.inputs,
+        input_k : st.input_k,
+        input_nr : st.input_nr,
+        input_nc : st.input_nc
+    }
+}
+
+fn restore_state(ref st : State, saved_st : SavedState) {
+    st.inputs = saved_st.inputs;
+    st.input_k = saved_st.input_k;
+    st.input_nr = saved_st.input_nr;
+    st.input_nc = saved_st.input_nc;
+}
+
+fn debug_print_fixed(f : Num) where Field[N] {
+    dbg_print(fixed_to_string(f));
+}
+
+fn get_data(ref st : State, n : u64 $pre @public) -> list[Num] where Vectorization {
+    let i' = st.data_i + n;
+    let res = st.data[st.data_i .. i'];
+    st.data_i = i';
+    data_fixeds_to_post(res, n)
+}
+
+fn get_data2_pre(ref st : State, n : u64 $pre @public) -> list[DataNum] {
+    if (st.check_expected_outputs) {
+        let i' = st.data2_i + n;
+        let res = st.data2[st.data2_i .. i'];
+        st.data2_i = i';
+        dataints_to_datanums(res, n)
+    } else {
+        []
+    }
+}
+
+fn get_data_pre_coefs(ref st : State, n : u64 $pre @public) -> list[DataInt] {
+    let i' = st.data_i + n;
+    let res = st.data[st.data_i .. i'];
+    st.data_i = i';
+    check_dataints(res, n);
+    res
+}
+
+fn ignore_data2(ref st : State, n : u64 $pre @public) {
+    let i' = st.data2_i + n;
+    st.data2_i = i';
+}
+
+fn abs[@D](x : uint $pre @D) -> uint $pre @D {
+    if (x >= 0) { x } else { -x }
+}
+
+fn compare_outputs(computed_outputs : list[Num], expected_outputs : list[DataNum]) {
+    if (length(expected_outputs) > 0) {
+        dbg_assert(length(computed_outputs) == length(expected_outputs));
+        dbg_print("compare_outputs" : string $pre @public);
+        let mut s : uint $pre @prover = 0;
+        let mut d : uint $pre @prover = 0;
+        for i in 0 .. length(computed_outputs) {
+            let c : uint $pre @prover = signed_uintN_to_uint(computed_outputs[i].coef as $pre);
+            let e : uint $pre @prover = signed_uintN_to_uint(expected_outputs[i].coef as @prover);
+            s = s + abs(e);
+            d = d + abs(c - e);
+        }
+        dbg_print("s, d, s/d:" : string $pre @public);
+        dbg_print(to_string(s));
+        dbg_print(to_string(d));
+        dbg_print(to_string(s/d));
+    }
+}
+
+// For fully connected layers the weight matrix is given transposed
+// compared to the weight matrices of ordinary convolutional layers,
+// so we set transpose_weight_matrix = true
+fn fc_without_bias(ref st : State, params : Conv) where Field[N], Vectorization {
+    conv_or_fc_with_or_without_bias(ref st, params, false, true, false);
+}
+
+// with bias and without transposing the weight matrix
+fn conv(ref st : State, params : Conv) where Field[N], Vectorization {
+    conv_or_fc_with_or_without_bias(ref st, params, true, false, false);
+}
+
+// conv + affine layer merge to optimize it better
+// the affine transformation is applied to the weights and biases instead of the outputs of the convolutional layer
+// as usually there are much fewer weights that outputs;
+// if there are more outputs than weights then calling conv and affine_conv separately would be faster;
+// According to benchmarking results, conv_and_affine is faster for layers 131-64
+// and separate conv and affine_conv are faster for layers 63-1
+fn conv_and_affine(ref st : State, params : Conv) where Field[N], Vectorization {
+    conv_or_fc_with_or_without_bias(ref st, params, true, false, true);
+}
+
+// m has nr rows and nc columns
+// output has nc rows and nr columns
+fn transpose_matrix(m : list[DataInt], nr : u64 $pre @public, nc : u64 $pre @public) -> list[DataInt] {
+    let mut computed_outputs : list[DataInt] = [];
+    dbg_assert(length(m) == nr * nc);
+    for i in 0 .. nc {
+        for j in 0 .. nr {
+            list_push(ref computed_outputs, get2d(m, nc, j, i));
+        }
+        {}
+    }
+    computed_outputs
+}
+
+fn conv_or_fc_with_or_without_bias(ref st : State, params : Conv, use_bias : bool $pre @public, transpose_weight_matrix : bool $pre @public, use_affine : bool $pre @public) where Field[N], Vectorization {
+    dbg_print("conv" : string $pre @public);
+    let filter_size = st.input_k * params.filter_nr * params.filter_nc;
+    let output_nr = (st.input_nr + 2 * params.padding - (params.filter_nr - 1) + (params.stride - 1)) / params.stride;
+    let output_nc = (st.input_nc + 2 * params.padding - (params.filter_nc - 1) + (params.stride - 1)) / params.stride;
+
+    let weights_and_biases =
+        if (use_affine) {
+            dbg_print("affine begin" : string $pre @public);
+            dbg_assert(use_bias);
+            dbg_assert(!transpose_weight_matrix);
+            let weights1 = get_data_pre_coefs(ref st, params.num_filters * filter_size);
+            let biases1 = get_data_pre_coefs(ref st, params.num_filters);
+            let mut weights : list[DataInt] = [];
+            let mut biases : list[DataInt] = [];
+            let a = get_data_pre_coefs(ref st, params.num_filters);
+            let b = get_data_pre_coefs(ref st, params.num_filters);
+            let len = fixed_len();
+            let pplen = fixed_pplen();
+            let pow2pp : uint $pre @verifier = pow_pre_inf(2, pplen);
+            let pow2_1 : uint $pre @verifier = pow_pre_inf(2 : uint $pre @verifier, len-1);
+            let mut ij = 0;
+            for i in 0 .. params.num_filters {
+                for j in 0 .. filter_size {
+                    list_push(ref weights, weights1[ij] * a[i] / pow2pp);
+                    ij = ij + 1;
+                }
+                list_push(ref biases, biases1[i] * a[i] / pow2pp + b[i]);
+            }
+            for i in 0 .. length(weights) {
+                let x = weights[i];
+                dbg_assert(x + pow2_1 >= 0);
+                dbg_assert(x < pow2_1);
+            }
+            for i in 0 .. length(biases) {
+                let x = biases[i];
+                dbg_assert(x + pow2_1 >= 0);
+                dbg_assert(x < pow2_1);
+            }
+            let biases : arr[uint[N] $pre @verifier] = freeze(for i in 0 .. length(biases) { biases[i] as uint[N] });
+            let biases : arr[uint[N] $post @verifier] = array_to_post(biases);
+            let biases : list[Num] = for i in 0 .. length(biases) {
+                Fixed {
+                    coef : biases[i] as @prover,
+                    len : len,
+                    pplen : pplen
+                }
+            };
+            dbg_print("affine end" : string $pre @public);
+            (weights, biases)
+        } else {
+            dbg_print("non-affine get_data" : string $pre @public);
+            let weights = get_data_pre_coefs(ref st, params.num_filters * filter_size);
+            let weights =
+                if (transpose_weight_matrix) {
+                    transpose_matrix(weights, filter_size, params.num_filters)
+                } else {
+                    weights
+                };
+            dbg_print("non-affine 2" : string $pre @public);
+            let biases1 =
+                if (use_bias) {
+                    get_data(ref st, params.num_filters)
+                } else {
+                    // set biases to zero
+                    [st.def; params.num_filters]
+                };
+            dbg_print("non-affine end" : string $pre @public);
+            (weights, biases1)
+        };
+    let weights = weights_and_biases.0;
+    let biases = weights_and_biases.1;
+
+    let expected_outputs =
+        if (use_affine) {
+            []
+        } else {
+            get_data2_pre(ref st, params.num_filters * output_nr * output_nc)
+        };
+
+    let cws : list[arr[uint[N] $post @prover]] =
+        for i in 0 .. params.num_filters {
+            array_to_prover(conv_weights(weights, i, filter_size))
+        };
+    let mut cis : list[list[Num]] = [];
+    let mut r = (params.filter_nr - 1) / 2 - params.padding;
+    for r0 in 0 .. output_nr {
+        let mut c = (params.filter_nc - 1) / 2 - params.padding;
+        for c0 in 0 .. output_nc {
+            list_push(ref cis, conv_inputs(st.inputs, st.def, params.filter_nr, params.filter_nc, st.input_k, st.input_nr, st.input_nc, r, c));
+            c = c + params.stride;
+        }
+        r = r + params.stride;
+        {}
+    }
+    let computed_outputs : list[Num] = fixed_matrix_prod_with_bias(cws, cis, biases);
+    // for the fully connected layer, need to do the overflow check, as there is no following relu layer
+    if (!use_bias) {
+        for i in 0 .. length(computed_outputs) {
+            check_fixed(computed_outputs[i]);
+        }
+        {}
+    }
+    if (!use_affine) {
+        // If use_affine then computed_outputs are after the affine layer
+        // but expected_outputs are after the conv layer
+        // so we cannot compare them.
+        // Now expected_outputs are not read in with use_affine at all.
+        compare_outputs(computed_outputs, expected_outputs);
+    }
+    st.inputs = computed_outputs;
+    st.input_k = params.num_filters;
+    st.input_nr = output_nr;
+    st.input_nc = output_nc;
+    {}
+}
+
+fn affine_conv(ref st : State) where Field[N], Vectorization {
+    let a = get_data(ref st, st.input_k);
+    let b = get_data(ref st, st.input_k);
+    let nrc = st.input_nr * st.input_nc;
+    let mut computed_outputs : list[Num] = [];
+    dbg_print("affine_conv" : string $pre @public);
+    // we need to check overflow here because it was omitted in the preceding convolutional layer
+    check_fixed_vectorized(st.inputs);
+    for i in 0 .. st.input_k {
+        for j in 0 .. nrc {
+            let output = affine_fixed_unsafe(get2d(st.inputs, nrc, i, j), a[i], b[i]);
+            list_push(ref computed_outputs, output);
+        }
+        {}
+    }
+    st.inputs = round_down_fixed_unsafe_vectorized(computed_outputs, st.def.len, st.def.pplen);
+}
+
+fn check_outputs(ref st : State) {
+    let expected_outputs = get_data2_pre(ref st, length(st.inputs));
+    compare_outputs(st.inputs, expected_outputs);
+}
+
+fn ignore_expected_outputs(ref st : State) {
+    ignore_data2(ref st, length(st.inputs));
+}
+
+pub fn fixed_cond_uint(b : uint[N] $post @prover, x : Num, y : Num) -> Num
+  where Field[N] {
+    dbg_assert(x.len == y.len);
+    dbg_assert(x.pplen == y.pplen);
+    Fixed {
+        coef : b*x.coef + (1-b)*y.coef,
+        len : x.len,
+        pplen : x.pplen
+    }
+} 
+
+fn relu(ref st : State) where Field[N], Vectorization {
+    dbg_print("relu" : string $pre @public);
+    let len = st.def.len;
+    let pplen = st.def.pplen;
+    let pow2 = (wire{pow_pre(2 : uint[N] $pre @public, len-1)}) as @prover; 
+    let adjusted_coefs =
+        for i in 0 .. length(st.inputs) {
+            st.inputs[i].coef + pow2
+        };
+    let bitvecs = bitextract_uv(freeze(adjusted_coefs), len);
+    let computed_outputs = for i in 0 .. length(st.inputs) {
+        let x = st.inputs[i];
+        dbg_assert(x.len == len);
+        dbg_assert(x.pplen == pplen);
+        let is_nonnegative = bitvecs[len-1][i];
+        fixed_cond_uint(is_nonnegative, x, st.def)
+    };
+    st.inputs = computed_outputs;
+}
+
+// divides by 2^n
+fn divide_by_power_of_two_vectorized(xs : list[Num], n : u64 $pre @public) -> list[Num] where Field[N], Vectorization {
+    dbg_assert(n >= 0);
+    // round off the last bits
+    let ys = round_down_fixed_vectorized(xs, xs[0].len, xs[0].pplen - n);
+    // move the point left
+    for i in 0 .. length(ys) {
+        let y = ys[i];
+        Fixed {
+            coef : y.coef,
+            len : y.len,
+            pplen : y.pplen + n
+        }
+    }
+}
+
+fn avg_pool(ref st : State) where Field[N], Vectorization {
+    dbg_print("avg_pool" : string $pre @public);
+    // currently nr=2 nc=2 stride=2 padding=0 hardcoded
+    let output_nr = st.input_nr / 2;
+    let output_nc = st.input_nc / 2;
+    let mut computed_outputs : list[Num] = [];
+    for k in 0 .. st.input_k {
+        for i in 0 .. output_nr {
+            for j in 0 .. output_nc {
+                let x1 = get3d'(st.inputs, st.input_nr, st.input_nc, k, 2*i, 2*j);
+                let x2 = get3d'(st.inputs, st.input_nr, st.input_nc, k, 2*i, 2*j+1);
+                let x3 = get3d'(st.inputs, st.input_nr, st.input_nc, k, 2*i+1, 2*j);
+                let x4 = get3d'(st.inputs, st.input_nr, st.input_nc, k, 2*i+1, 2*j+1);
+                let x = add_fixed(add_fixed(x1, x2), add_fixed(x3, x4));
+                list_push(ref computed_outputs, x);
+            }
+            {}
+        }
+        {}
+    }
+    let computed_outputs = divide_by_power_of_two_vectorized(computed_outputs, 2);
+    let expected_outputs = get_data2_pre(ref st, st.input_k * output_nr * output_nc);
+    compare_outputs(computed_outputs, expected_outputs);
+    st.inputs = computed_outputs;
+    st.input_nr = output_nr;
+    st.input_nc = output_nc;
+}
+
+fn vectorized_bitarray_cond_uint(b : arr[uint[N] $post @prover], arr1 : list[arr[uint[N] $post @prover]], arr2 : list[arr[uint[N] $post @prover]]) -> list[arr[uint[N] $post @prover]] where Vectorization {
+    dbg_assert(length(arr1) == length(arr2));
+    for i in 0 .. length(arr1) {
+        let r1 : arr[uint[N] $post @prover] = arr1[i] -. arr2[i];
+        let r2 : arr[uint[N] $post @prover] = b *. r1;
+        arr2[i] +. r2
+    }
+}
+
+fn vectorized_uint_cond(b : arr[uint[N] $post @prover], arr1 : arr[uint[N] $post @prover], arr2 : arr[uint[N] $post @prover]) -> arr[uint[N] $post @prover] where Vectorization {
+    dbg_assert(length(arr1) == length(arr2));
+    let r1 : arr[uint[N] $post @prover] = arr1 -. arr2;
+    let r2 : arr[uint[N] $post @prover] = b *. r1;
+    arr2 +. r2
+}
+
+fn vectorized_threebitselect(x : arr[uint[N] $post @prover], y : arr[uint[N] $post @prover], z : arr[uint[N] $post @prover]) -> arr[uint[N] $post @prover] where Vectorization {
+    let p : arr[uint[N] $post @prover] = y *. z;
+    let s1 : arr[uint[N] $post @prover] = y +. z;
+    let s : arr[uint[N] $post @prover] = s1 -. p;
+    let r1 : arr[uint[N] $post @prover] = p -. s;
+    let r2 : arr[uint[N] $post @prover] = r1 *. x;
+    s +. r2
+}
+
+sieve fn one_minus(x : uint[N] $post @prover) -> uint[N] $post @prover {
+    1 - x
+}
+
+sieve fn minus_1(x : uint[N] $post @prover) -> uint[N] $post @prover {
+    x - 1
+}
+
+fn vectorized_less_than_uint(xb : list[arr[uint[N] $post @prover]], yb : list[arr[uint[N] $post @prover]], bw : u64 $pre @public) -> arr[uint[N] $post @prover] where Vectorization {
+    let r1 : arr[uint[N] $post @prover] = one_minus.(xb[0]);
+    let mut res = r1 *. yb[0];
+    for i in 1 .. bw {
+        res = vectorized_threebitselect(xb[i], yb[i], res);
+    }
+    res
+}
+
+fn vectorized_maximum_pre(x_pre : list[uint[N] $pre @prover], y_pre : list[uint[N] $pre @prover]) -> list[uint[N] $pre @prover] {
+    for i in 0 .. length(x_pre) {
+        let x = x_pre[i];
+        let y = y_pre[i];
+        if (x > y) {
+            x
+        } else {
+            y
+        }
+    }
+}
+
+fn vectorized_maximum(
+        x : tuple[arr[uint[N] $post @prover], list[arr[uint[N] $post @prover]], list[uint[N] $pre @prover]],
+        y : tuple[arr[uint[N] $post @prover], list[arr[uint[N] $post @prover]], list[uint[N] $pre @prover]]
+        ) -> tuple[arr[uint[N] $post @prover], list[arr[uint[N] $post @prover]], list[uint[N] $pre @prover]] where Vectorization {
+    let b = vectorized_less_than_uint(x.1, y.1, length(x.1));
+    let m = vectorized_uint_cond(b, y.0, x.0);
+    let bits = vectorized_bitarray_cond_uint(b, y.1, x.1);
+    let m_pre = vectorized_maximum_pre(x.2, y.2);
+    (m, bits, m_pre)
+}
+
+fn vectorized_maximum_without_bits(
+        x : tuple[arr[uint[N] $post @prover], list[arr[uint[N] $post @prover]], list[uint[N] $pre @prover]],
+        y : tuple[arr[uint[N] $post @prover], list[arr[uint[N] $post @prover]], list[uint[N] $pre @prover]]
+        ) -> list[uint[N] $post @prover] where Vectorization {
+    let b = vectorized_less_than_uint(x.1, y.1, length(x.1));
+    let m = vectorized_uint_cond(b, y.0, x.0);
+    let m_pre = vectorized_maximum_pre(x.2, y.2);
+    for i in 0 .. length(m) {
+        make_not_unknown(m[i], m_pre[i])
+    }
+}
+
+// used for max_pool_using_saved_bitextracts
+fn vec_input_slice(
+        input : tuple[arr[uint[N] $post @prover], list[arr[uint[N] $post @prover]], list[uint[N] $pre @prover]],
+        i1 : u64 $pre @public,
+        i2 : u64 $pre @public
+        ) -> tuple[arr[uint[N] $post @prover], list[arr[uint[N] $post @prover]], list[uint[N] $pre @prover]] {
+    (
+        input.0[i1 .. i2],
+        for i in 0 .. length(input.1) {
+            input.1[i][i1 .. i2]
+        },
+        input.2[i1 .. i2]
+    )
+}
+
+// used for max_pool_using_saved_bitextracts
+fn vec_quadrant(inputs : list[Num]) -> tuple[arr[uint[N] $post @prover], list[arr[uint[N] $post @prover]], list[uint[N] $pre @prover]] where Field[N], Vectorization {
+    let len = fixed_len();
+    let pplen = fixed_pplen();
+    let n = length(inputs);
+    let pow2 = (wire{pow_pre(2 : uint[N] $pre @public, len-1)}) as @prover; 
+    let adjusted_coefs =
+        for i in 0 .. n {
+            inputs[i].coef + pow2
+        };
+    let bitvecs = bitextract_uv(freeze(adjusted_coefs), len);
+    let is_nonneg = bitvecs[len-1];
+    let coefs =
+        for i in 0 .. n {
+            let x = inputs[i];
+            dbg_assert(x.len == len);
+            dbg_assert(x.pplen == pplen);
+            let is_nonnegative = is_nonneg[i];
+            is_nonnegative * x.coef
+        };
+    let coefs_pre =
+        for i in 0 .. n {
+            coefs[i] as $pre
+        };
+    let coefs = freeze(coefs);
+    (make_unknown(coefs), make_unknown(bitvecs), coefs_pre)
+}
+
+fn relu_and_max_pool(ref st : State) where Field[N], Vectorization {
+    dbg_print("max_pool: vectorize quadrants" : string $pre @public);
+    // currently nr=3 nc=3 stride=2 padding=0 hardcoded
+    // and the number of input rows and columns must be even
+    let inputs = st.inputs;
+    dbg_assert(st.input_nr % 2 == 0);
+    dbg_assert(st.input_nc % 2 == 0);
+    let output_nr = (st.input_nr - 1) / 2;
+    let output_nc = (st.input_nc - 1) / 2;
+    let input_quadrant_nr = output_nr + 1;
+    let input_quadrant_nc = output_nc + 1;
+    let mut inputs00 = [];
+    let mut inputs01 = [];
+    let mut inputs10 = [];
+    let mut inputs11 = [];
+    for k in 0 .. st.input_k {
+        for i in 0 .. input_quadrant_nr {
+            for j in 0 .. input_quadrant_nc {
+                list_push(ref inputs00, get3d'(inputs, st.input_nr, st.input_nc, k, 2*i, 2*j));
+                list_push(ref inputs01, get3d'(inputs, st.input_nr, st.input_nc, k, 2*i, 2*j+1));
+                list_push(ref inputs10, get3d'(inputs, st.input_nr, st.input_nc, k, 2*i+1, 2*j));
+                list_push(ref inputs11, get3d'(inputs, st.input_nr, st.input_nc, k, 2*i+1, 2*j+1));
+            }
+            {}
+        }
+        {}
+    }
+    let inputs00 = vec_quadrant(inputs00);
+    let inputs01 = vec_quadrant(inputs01);
+    let inputs10 = vec_quadrant(inputs10);
+    let inputs11 = vec_quadrant(inputs11);
+    let quadrant_len = st.input_k * input_quadrant_nr * input_quadrant_nc;
+
+    dbg_print("max_pool: compute maximums" : string $pre @public);
+    let inputs0m0 = vec_input_slice(inputs00, 0, quadrant_len - 1);
+    let inputs0m1 = vec_input_slice(inputs01, 0, quadrant_len - 1);
+    let inputs0m2 = vec_input_slice(inputs00, 1, quadrant_len);
+    let inputs0m = vectorized_maximum(vectorized_maximum(inputs0m0, inputs0m1), inputs0m2);
+    let inputs1m0 = vec_input_slice(inputs10, 0, quadrant_len - 1);
+    let inputs1m1 = vec_input_slice(inputs11, 0, quadrant_len - 1);
+    let inputs1m2 = vec_input_slice(inputs10, 1, quadrant_len);
+    let inputs1m = vectorized_maximum(vectorized_maximum(inputs1m0, inputs1m1), inputs1m2);
+    let inputs_m0 = vec_input_slice(inputs0m, 0, quadrant_len - 1 - input_quadrant_nc);
+    let inputs_m1 = vec_input_slice(inputs1m, 0, quadrant_len - 1 - input_quadrant_nc);
+    let inputs_m2 = vec_input_slice(inputs0m, input_quadrant_nc, quadrant_len - 1);
+    let inputs_m_list = vectorized_maximum_without_bits(vectorized_maximum(inputs_m0, inputs_m1), inputs_m2);
+
+    dbg_print("max_pool: construct output" : string $pre @public);
+    let mut computed_outputs : list[Num] = [];
+    let len = fixed_len();
+    let pplen = fixed_pplen();
+    for k in 0 .. st.input_k {
+        for i in 0 .. output_nr {
+            for j in 0 .. output_nc {
+                let coef = get3d'(inputs_m_list, input_quadrant_nr, input_quadrant_nc, k, i, j);
+                let x = Fixed { coef : coef, len : len, pplen : pplen };
+                list_push(ref computed_outputs, x);
+            }
+            {}
+        }
+        {}
+    }
+    dbg_print("max_pool: get_data2_pre" : string $pre @public);
+    ignore_expected_outputs(ref st);
+    let expected_outputs = get_data2_pre(ref st, st.input_k * output_nr * output_nc);
+    compare_outputs(computed_outputs, expected_outputs);
+    st.inputs = computed_outputs;
+    st.input_nr = output_nr;
+    st.input_nc = output_nc;
+}
+
+fn add_prev(ref st : State, saved_st : SavedState) where Field[N], Vectorization {
+    dbg_print("add_prev" : string $pre @public);
+    dbg_assert(st.input_k == saved_st.input_k);
+    dbg_assert(st.input_nr == saved_st.input_nr);
+    dbg_assert(st.input_nc == saved_st.input_nc);
+    dbg_assert(length(st.inputs) == length(saved_st.inputs));
+    for i in 0 .. length(st.inputs) {
+        // unsafe: we omit the overflow check here, assuming it will be done in the following relu layer
+        //st.inputs[i] = add_fixed_checked(st.inputs[i], saved_st.inputs[i]);
+        st.inputs[i] = add_fixed(st.inputs[i], saved_st.inputs[i]);
+    }
+    {}
+}
+
+// A version of add_prev where the added tensors may have different sizes.
+// Then they are padded with zeros to make then the same size.
+fn add_prev2(ref st : State, saved_st : SavedState) where Field[N] {
+    dbg_print("add_prev2" : string $pre @public);
+    let output_k = max_pre(st.input_k, saved_st.input_k);
+    let output_nr = max_pre(st.input_nr, saved_st.input_nr);
+    let output_nc = max_pre(st.input_nc, saved_st.input_nc);
+    let mut computed_outputs : list[Num] = [];
+    for k in 0 .. output_k {
+        for i in 0 .. output_nr {
+            for j in 0 .. output_nc {
+                let x1 = get3d''(st.inputs, st.def, st.input_k, st.input_nr, st.input_nc, k, i, j);
+                let x2 = get3d''(saved_st.inputs, st.def, saved_st.input_k, saved_st.input_nr, saved_st.input_nc, k, i, j);
+                // unsafe: we omit the overflow check here, assuming it will be done in the following relu layer
+                //list_push(ref computed_outputs, add_fixed_checked(x1, x2));
+                list_push(ref computed_outputs, add_fixed(x1, x2));
+            }
+            {}
+        }
+        {}
+    }
+    st.inputs = computed_outputs;
+    st.input_k = output_k;
+    st.input_nr = output_nr;
+    st.input_nc = output_nc;
+    {}
+}
+
+fn input_layer(data : list[DataInt], data2 : list[DataInt], check_expected_outputs : bool $pre @public, nr : u64 $pre @public, nc : u64 $pre @public, face : list[list[uint[N] $post @prover]]) -> State where Field[N] {
+    dbg_print("input_layer" : string $pre @public);
+    let avg_rgb : list[Num] = [
+        pre_uint_to_post_prover_fixed(16479521079 : uint $pre @public),  // avg_red   = 122.782/256
+        pre_uint_to_post_prover_fixed(15703608393 : uint $pre @public),  // avg_green = 117.001/256
+        pre_uint_to_post_prover_fixed(13998640594 : uint $pre @public)]; // avg_blue  = 104.298/256
+    let num_pixels = nr * nc;
+    dbg_assert(length(face) == 3);
+    // since we need to divide the pixel values by 256, the scaling factor is 2^(fixed_pplen - 8) rather than 2^fixed_pplen
+    let scaling_factor = (wire{pow_pre(2 : uint[N] $pre @public, fixed_pplen() - 8)}) as @prover;
+    let mut computed_outputs : list[Num] = [];
+    for i in 0 .. 3 : u64 $pre @public {
+        dbg_assert(length(face[i]) == num_pixels);
+        for j in 0 .. num_pixels {
+            let x = face[i][j];
+            // convert to a fixed point number and divide by 256
+            let y = Fixed { coef : x * scaling_factor, len : fixed_len(), pplen : fixed_pplen()};
+            let z = sub_fixed(y, avg_rgb[i]);
+            list_push(ref computed_outputs, z);
+        }
+        {}
+    }
+    State {
+        inputs : computed_outputs,
+        input_k : 3,
+        input_nr : nr,
+        input_nc : nc,
+        data : data,
+        data_i : 0,
+        data2 : data2,
+        data2_i : 0,
+        check_expected_outputs: check_expected_outputs,
+        def : fixed(0, fixed_len(), fixed_pplen())
+    }
+}
+
+pub struct Resnet {
+    data : list[DataInt],
+    data2 : list[DataInt],
+    check_expected_outputs : bool $pre @public,
+    nr : u64 $pre @public,
+    nc : u64 $pre @public
+}
+
+// Initializes a resnet that can be used with apply_resnet (several times if necessary).
+pub fn init_resnet() -> Resnet {
+    init_resnet0(false)
+}
+
+pub fn init_resnet0(allow_check_expected_outputs : bool $pre @public) -> Resnet {
+    dbg_print("init_resnet: start" : string $pre @public);
+    let data_verifier : list[DataInt] $pre @verifier = get_instance("data");
+    let data_len : u64 $pre @public = get_public("data_len");
+    dbg_print(to_string(length(data_verifier)));
+    dbg_print(to_string(data_len));
+    dbg_assert(length(data_verifier) == data_len as @verifier);
+    let data =
+        for i in 0 .. data_len {
+            data_verifier[i as @verifier]
+        };
+    let check_expected_outputs : bool $pre @public =
+        if (allow_check_expected_outputs) {
+            get_public("check_expected_outputs")
+        } else {
+            false
+        };
+
+    let data2 =
+        if (check_expected_outputs) {
+            let data2_verifier : list[DataInt] $pre @verifier = get_instance("expected_outputs");
+            let data2_len : u64 $pre @public = get_public("expected_outputs_len");
+            dbg_print(to_string(length(data2_verifier)));
+            dbg_print(to_string(data2_len));
+            dbg_assert(length(data2_verifier) == data2_len as @verifier);
+            for i in 0 .. data2_len {
+                data2_verifier[i as @verifier]
+            }
+        } else {
+            []
+        };
+
+    let nr = get_public("face_num_rows");
+    let nc = get_public("face_num_columns");
+
+    dbg_print("init_resnet: end" : string $pre @public);
+    Resnet {
+        data : data,
+        data2 : data2,
+        check_expected_outputs : check_expected_outputs,
+        nr : nr,
+        nc : nc
+    }
+}
+
+// The input `face` is a list of length 3, where each element is a list of length 150*150. The lists face[0], face[1], and face[2] are the red, green, and blue channels of the pixels of the image, given in row-major order.
+// It assumes that face[i][j] is in the range 0..255, it is not checked here.
+pub fn apply_resnet(r : Resnet, face : list[list[uint[N] $post @prover]]) -> list[Num] where Field[N], Vectorization {
+    dbg_print("apply_resnet: start" : string $pre @public);
+
+    // layer 131
+    let mut st : State = input_layer(r.data, r.data2, r.check_expected_outputs, r.nr, r.nc, face);
+    check_outputs(ref st);
+
+    dbg_print("layer 130-129" : string $pre @public);
+    conv_and_affine(ref st, Conv {
+        num_filters : 32,
+        filter_nr : 7,
+        filter_nc : 7,
+        stride : 2,
+        padding : 0
+    });
+
+    dbg_print("layer 128-127" : string $pre @public);
+    relu_and_max_pool(ref st);
+
+    dbg_print("layer 126" : string $pre @public);
+    let st_tag1 = save_state(st); // tag layers save state for use in later layers
+    dbg_print("layer 125-124" : string $pre @public);
+    conv_and_affine(ref st, Conv {
+        num_filters : 32,
+        filter_nr : 3,
+        filter_nc : 3,
+        stride : 1,
+        padding : 1
+    });
+    check_outputs(ref st);
+    dbg_print("layer 123" : string $pre @public);
+    relu(ref st);
+    check_outputs(ref st);
+    dbg_print("layer 122-121" : string $pre @public);
+    conv_and_affine(ref st, Conv {
+        num_filters : 32,
+        filter_nr : 3,
+        filter_nc : 3,
+        stride : 1,
+        padding : 1
+    });
+    check_outputs(ref st);
+    dbg_print("layer 120" : string $pre @public);
+    add_prev(ref st, st_tag1);
+    dbg_print("layer 119" : string $pre @public);
+    relu(ref st);
+    check_outputs(ref st);
+    dbg_print("layer 118" : string $pre @public);
+    let st_tag1 = save_state(st);
+    dbg_print("layer 117-116" : string $pre @public);
+    conv_and_affine(ref st, Conv {
+        num_filters : 32,
+        filter_nr : 3,
+        filter_nc : 3,
+        stride : 1,
+        padding : 1
+    });
+    dbg_print("layer 115" : string $pre @public);
+    relu(ref st);
+    dbg_print("layer 114-113" : string $pre @public);
+    conv_and_affine(ref st, Conv {
+        num_filters : 32,
+        filter_nr : 3,
+        filter_nc : 3,
+        stride : 1,
+        padding : 1
+    });
+    dbg_print("layer 112" : string $pre @public);
+    add_prev(ref st, st_tag1);
+    dbg_print("layer 111" : string $pre @public);
+    relu(ref st);
+    dbg_print("layer 110" : string $pre @public);
+    let st_tag1 = save_state(st);
+    dbg_print("layer 109-108" : string $pre @public);
+    conv_and_affine(ref st, Conv {
+        num_filters : 32,
+        filter_nr : 3,
+        filter_nc : 3,
+        stride : 1,
+        padding : 1
+    });
+    dbg_print("layer 107" : string $pre @public);
+    relu(ref st);
+    dbg_print("layer 106-105" : string $pre @public);
+    conv_and_affine(ref st, Conv {
+        num_filters : 32,
+        filter_nr : 3,
+        filter_nc : 3,
+        stride : 1,
+        padding : 1
+    });
+    dbg_print("layer 104" : string $pre @public);
+    add_prev(ref st, st_tag1);
+    dbg_print("layer 103" : string $pre @public);
+    relu(ref st);
+    dbg_print("layer 102" : string $pre @public);
+    let st_tag1 = save_state(st);
+    dbg_print("layer 101-100" : string $pre @public);
+    conv_and_affine(ref st, Conv {
+        num_filters : 64,
+        filter_nr : 3,
+        filter_nc : 3,
+        stride : 2,
+        padding : 0
+    });
+    dbg_print("layer 99" : string $pre @public);
+    relu(ref st);
+    dbg_print("layer 98-97" : string $pre @public);
+    conv_and_affine(ref st, Conv {
+        num_filters : 64,
+        filter_nr : 3,
+        filter_nc : 3,
+        stride : 1,
+        padding : 1
+    });
+    dbg_print("layer 96" : string $pre @public);
+    let st_tag2 = save_state(st);
+    dbg_print("layer 95" : string $pre @public);
+    restore_state(ref st, st_tag1);
+    dbg_print("layer 94" : string $pre @public);
+    avg_pool(ref st);
+    dbg_print("layer 93" : string $pre @public);
+    add_prev2(ref st, st_tag2);
+    dbg_print("layer 92" : string $pre @public);
+    relu(ref st);
+    check_outputs(ref st);
+    dbg_print("layer 91" : string $pre @public);
+    let st_tag1 = save_state(st);
+    dbg_print("layer 90-89" : string $pre @public);
+    conv_and_affine(ref st, Conv {
+        num_filters : 64,
+        filter_nr : 3,
+        filter_nc : 3,
+        stride : 1,
+        padding : 1
+    });
+    dbg_print("layer 88" : string $pre @public);
+    relu(ref st);
+    dbg_print("layer 87-86" : string $pre @public);
+    conv_and_affine(ref st, Conv {
+        num_filters : 64,
+        filter_nr : 3,
+        filter_nc : 3,
+        stride : 1,
+        padding : 1
+    });
+    dbg_print("layer 85" : string $pre @public);
+    add_prev(ref st, st_tag1);
+    dbg_print("layer 84" : string $pre @public);
+    relu(ref st);
+    dbg_print("layer 83" : string $pre @public);
+    let st_tag1 = save_state(st);
+    dbg_print("layer 82-81" : string $pre @public);
+    conv_and_affine(ref st, Conv {
+        num_filters : 64,
+        filter_nr : 3,
+        filter_nc : 3,
+        stride : 1,
+        padding : 1
+    });
+    dbg_print("layer 80" : string $pre @public);
+    relu(ref st);
+    dbg_print("layer 79-78" : string $pre @public);
+    conv_and_affine(ref st, Conv {
+        num_filters : 64,
+        filter_nr : 3,
+        filter_nc : 3,
+        stride : 1,
+        padding : 1
+    });
+    dbg_print("layer 77" : string $pre @public);
+    add_prev(ref st, st_tag1);
+    dbg_print("layer 76" : string $pre @public);
+    relu(ref st);
+    dbg_print("layer 75" : string $pre @public);
+    let st_tag1 = save_state(st);
+    dbg_print("layer 74-73" : string $pre @public);
+    conv_and_affine(ref st, Conv {
+        num_filters : 64,
+        filter_nr : 3,
+        filter_nc : 3,
+        stride : 1,
+        padding : 1
+    });
+    dbg_print("layer 72" : string $pre @public);
+    relu(ref st);
+    dbg_print("layer 71-70" : string $pre @public);
+    conv_and_affine(ref st, Conv {
+        num_filters : 64,
+        filter_nr : 3,
+        filter_nc : 3,
+        stride : 1,
+        padding : 1
+    });
+    dbg_print("layer 69" : string $pre @public);
+    add_prev(ref st, st_tag1);
+    dbg_print("layer 68" : string $pre @public);
+    relu(ref st);
+    dbg_print("layer 67" : string $pre @public);
+    let st_tag1 = save_state(st);
+    dbg_print("layer 66-65" : string $pre @public);
+    conv_and_affine(ref st, Conv {
+        num_filters : 128,
+        filter_nr : 3,
+        filter_nc : 3,
+        stride : 2,
+        padding : 0
+    });
+    dbg_print("layer 64" : string $pre @public);
+    relu(ref st);
+
+    // from this layer on, running conv and affine_conv separately is faster than the combined conv_and_affine
+    dbg_print("layer 63" : string $pre @public);
+    conv(ref st, Conv {
+        num_filters : 128,
+        filter_nr : 3,
+        filter_nc : 3,
+        stride : 1,
+        padding : 1
+    });
+    dbg_print("layer 62" : string $pre @public);
+    affine_conv(ref st);
+    dbg_print("layer 61" : string $pre @public);
+    let st_tag2 = save_state(st);
+    dbg_print("layer 60" : string $pre @public);
+    restore_state(ref st, st_tag1);
+    dbg_print("layer 59" : string $pre @public);
+    avg_pool(ref st);
+    dbg_print("layer 58" : string $pre @public);
+    add_prev2(ref st, st_tag2);
+    dbg_print("layer 57" : string $pre @public);
+    relu(ref st);
+    dbg_print("layer 56" : string $pre @public);
+    let st_tag1 = save_state(st);
+    dbg_print("layer 55" : string $pre @public);
+    conv(ref st, Conv {
+        num_filters : 128,
+        filter_nr : 3,
+        filter_nc : 3,
+        stride : 1,
+        padding : 1
+    });
+    dbg_print("layer 54" : string $pre @public);
+    affine_conv(ref st);
+    dbg_print("layer 53" : string $pre @public);
+    relu(ref st);
+    dbg_print("layer 52" : string $pre @public);
+    conv(ref st, Conv {
+        num_filters : 128,
+        filter_nr : 3,
+        filter_nc : 3,
+        stride : 1,
+        padding : 1
+    });
+    dbg_print("layer 51" : string $pre @public);
+    affine_conv(ref st);
+    dbg_print("layer 50" : string $pre @public);
+    add_prev(ref st, st_tag1);
+    dbg_print("layer 49" : string $pre @public);
+    relu(ref st);
+    dbg_print("layer 48" : string $pre @public);
+    let st_tag1 = save_state(st);
+    dbg_print("layer 47" : string $pre @public);
+    conv(ref st, Conv {
+        num_filters : 128,
+        filter_nr : 3,
+        filter_nc : 3,
+        stride : 1,
+        padding : 1
+    });
+    dbg_print("layer 46" : string $pre @public);
+    affine_conv(ref st);
+    dbg_print("layer 45" : string $pre @public);
+    relu(ref st);
+    dbg_print("layer 44" : string $pre @public);
+    conv(ref st, Conv {
+        num_filters : 128,
+        filter_nr : 3,
+        filter_nc : 3,
+        stride : 1,
+        padding : 1
+    });
+    dbg_print("layer 43" : string $pre @public);
+    affine_conv(ref st);
+    dbg_print("layer 42" : string $pre @public);
+    add_prev(ref st, st_tag1);
+    dbg_print("layer 41" : string $pre @public);
+    relu(ref st);
+    dbg_print("layer 40" : string $pre @public);
+    let st_tag1 = save_state(st);
+    dbg_print("layer 39" : string $pre @public);
+    conv(ref st, Conv {
+        num_filters : 256,
+        filter_nr : 3,
+        filter_nc : 3,
+        stride : 2,
+        padding : 0
+    });
+    dbg_print("layer 38" : string $pre @public);
+    affine_conv(ref st);
+    dbg_print("layer 37" : string $pre @public);
+    relu(ref st);
+    dbg_print("layer 36" : string $pre @public);
+    conv(ref st, Conv {
+        num_filters : 256,
+        filter_nr : 3,
+        filter_nc : 3,
+        stride : 1,
+        padding : 1
+    });
+    dbg_print("layer 35" : string $pre @public);
+    affine_conv(ref st);
+    dbg_print("layer 34" : string $pre @public);
+    let st_tag2 = save_state(st);
+    dbg_print("layer 33" : string $pre @public);
+    restore_state(ref st, st_tag1);
+    dbg_print("layer 32" : string $pre @public);
+    avg_pool(ref st);
+    dbg_print("layer 31" : string $pre @public);
+    add_prev2(ref st, st_tag2);
+    dbg_print("layer 30" : string $pre @public);
+    relu(ref st);
+    dbg_print("layer 29" : string $pre @public);
+    let st_tag1 = save_state(st);
+    dbg_print("layer 28" : string $pre @public);
+    conv(ref st, Conv {
+        num_filters : 256,
+        filter_nr : 3,
+        filter_nc : 3,
+        stride : 1,
+        padding : 1
+    });
+    dbg_print("layer 27" : string $pre @public);
+    affine_conv(ref st);
+    dbg_print("layer 26" : string $pre @public);
+    relu(ref st);
+    dbg_print("layer 25" : string $pre @public);
+    conv(ref st, Conv {
+        num_filters : 256,
+        filter_nr : 3,
+        filter_nc : 3,
+        stride : 1,
+        padding : 1
+    });
+    dbg_print("layer 24" : string $pre @public);
+    affine_conv(ref st);
+    dbg_print("layer 23" : string $pre @public);
+    add_prev(ref st, st_tag1);
+    dbg_print("layer 22" : string $pre @public);
+    relu(ref st);
+    dbg_print("layer 21" : string $pre @public);
+    let st_tag1 = save_state(st);
+    dbg_print("layer 20" : string $pre @public);
+    conv(ref st, Conv {
+        num_filters : 256,
+        filter_nr : 3,
+        filter_nc : 3,
+        stride : 1,
+        padding : 1
+    });
+    dbg_print("layer 19" : string $pre @public);
+    affine_conv(ref st);
+    dbg_print("layer 18" : string $pre @public);
+    relu(ref st);
+    dbg_print("layer 17" : string $pre @public);
+    conv(ref st, Conv {
+        num_filters : 256,
+        filter_nr : 3,
+        filter_nc : 3,
+        stride : 1,
+        padding : 1
+    });
+    dbg_print("layer 16" : string $pre @public);
+    affine_conv(ref st);
+    dbg_print("layer 15" : string $pre @public);
+    add_prev(ref st, st_tag1);
+    dbg_print("layer 14" : string $pre @public);
+    relu(ref st);
+    dbg_print("layer 13" : string $pre @public);
+    let st_tag1 = save_state(st);
+    dbg_print("layer 12" : string $pre @public);
+    conv(ref st, Conv {
+        num_filters : 256,
+        filter_nr : 3,
+        filter_nc : 3,
+        stride : 2,
+        padding : 0
+    });
+    dbg_print("layer 11" : string $pre @public);
+    affine_conv(ref st);
+    dbg_print("layer 10" : string $pre @public);
+    relu(ref st);
+    dbg_print("layer 9" : string $pre @public);
+    conv(ref st, Conv {
+        num_filters : 256,
+        filter_nr : 3,
+        filter_nc : 3,
+        stride : 1,
+        padding : 1
+    });
+    dbg_print("layer 8" : string $pre @public);
+    affine_conv(ref st);
+    dbg_print("layer 7" : string $pre @public);
+    let st_tag2 = save_state(st);
+    dbg_print("layer 6" : string $pre @public);
+    restore_state(ref st, st_tag1);
+    dbg_print("layer 5" : string $pre @public);
+    avg_pool(ref st);
+    dbg_print("layer 4" : string $pre @public);
+    add_prev2(ref st, st_tag2);
+    dbg_print("layer 3" : string $pre @public);
+    relu(ref st);
+    dbg_print("layer 2" : string $pre @public);
+    avg_pool(ref st);
+    dbg_print("layer 1" : string $pre @public);
+    // fully connected layer viewed as a convolutional layer without bias and with transposed weight matrix
+    fc_without_bias(ref st, Conv {
+        num_filters : 128,
+        filter_nr : 1,
+        filter_nc : 1,
+        stride : 1,
+        padding : 0
+    });
+
+    dbg_print("apply_resnet: end" : string $pre @public);
+    st.inputs
+}

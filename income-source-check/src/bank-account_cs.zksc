@@ -1,0 +1,247 @@
+use Std::*;
+use Integer::*;
+use Inequalities::*;
+use Store::*;
+use Date::*;
+use Commas::*;
+use Countries::*;
+
+type N : Nat = 2305843009213693951;
+
+struct AccountItemPos {
+  client : u64 $pre @public,
+  date : u64 $pre @public,
+  beneficiary : u64 $pre @public,
+  dc : u64 $pre @public,
+  amount : u64 $pre @public,
+}
+
+// Circuit computation
+// Input: List of all characters in the account statement; List of row lengths of the account statement; Number of rows
+// Output: List of rows, each given as list of characters in the row
+fn lines(chars : list[uint[N] $post @prover], lens : list[u64 $pre @public], stmt_length : u64 $pre @public) -> list[list[uint[N] $post @prover]] {
+  let mut a = 0;
+  for k in 0 .. stmt_length {
+    let row = for i in 0 .. lens[k] { chars[a + i] };
+    a = a + lens[k] + 1;
+    row
+  }
+}
+
+// Auxiliary function that finds the starting position of the field with number ord
+fn find_start_pos(ord : u64 $pre @public, commas : list[uint[N] $post @prover]) -> uint[N] $post @prover {
+  if (ord > 0) { commas[ord - 1] + 1 } else { 0 }
+}
+
+// Auxiliary function that finds the position denoting the end of the field with number ord
+fn find_finish_pos(ord : u64 $pre @public, commas : list[uint[N] $post @prover]) -> uint[N] $post @prover {
+  commas[ord]
+}
+
+// Circuit computation
+// Input: Store of characters of a row of account statement; List of positions of field-separating commas; Record of positions of fields in a transaction record; Expected client's bank account
+// Checks if the client field matches the expected client's bank account
+fn check_client(ref row : Store[N, $post, @prover], commas : list[uint[N] $post @prover], aip : AccountItemPos, client : list[uint[N] $post @public]) where Field[N] {
+  let mut real_ind = find_start_pos(aip.client, commas);
+  for i in 0 .. length(client) {
+    real_ind = real_ind + 1;
+    assert_zero(client[i] as @prover - row{#real_ind});
+  };
+}
+
+// Auxiliary function that extracts the integer value of the amount field given as a fixed-length list of characters
+fn read_amount(ext_amount : list[uint[N] $post @prover], decimal_separator : uint[N] $post @public, placeholder : uint[N] $post @public) -> uint[N] $post @prover where Field[N] {
+  let mut res = 0;
+  for i in 0 .. length(ext_amount) {
+    let digit = ext_amount[i] - 48;
+    let is_placeholder = eq(ext_amount[i], placeholder as @prover);
+    let is_point = eq(ext_amount[i], decimal_separator as @prover);
+    res = uint_cond(is_placeholder | is_point, res, res * 10 + digit);
+  }
+  res
+}
+
+// Circuit computation
+// Input: Store of characters of a row of account statement; Starting position of the amount field; Terminating position of the amount field; Record of positions of fields in a transaction record; Amount as a fixed-length list of characters; The symbol used to fill the missing places in the amount fields
+// Checks if the amount field matches that in the row of account statement
+fn check_ext_amount(ref row : Store[N, $post, @prover], start : uint[N] $post @prover, finish : uint[N] $post @prover, aip : AccountItemPos, ext_amount : list[uint[N] $post @prover], placeholder : uint[N] $post @public) where Field[N] {
+  let mut real_ind = start;
+  let mut flag = false;
+  for i in 0 .. length(ext_amount) {
+    flag = flag | neq(ext_amount[i], placeholder as @prover);
+    conditional_assert_zero(flag, ext_amount[i] - row{#real_ind});
+    real_ind = real_ind + flag as uint[N];
+  };
+  assert_zero(real_ind - finish);
+}
+
+// Circuit computation with check
+fn extend_amount(origrow : list[uint[N] $post @prover], ref row : Store[N, $post, @prover], commas : list[uint[N] $post @prover], aip : AccountItemPos, placeholder : uint[N] $post @public, amount_length : u64 $pre @public) -> list[uint[N] $post @prover] where Field[N] {
+  let origrow_pre = uint_list_to_pre(origrow) as @prover;
+  let start = find_start_pos(aip.amount, commas);
+  let finish = find_finish_pos(aip.amount, commas);
+  let pivot = amount_length as uint[N] as @prover - (finish as $pre - start as $pre);
+  let ext_amount = for i in 0 .. amount_length { 
+    let i_prover = i as uint[N] as @prover;
+    wire { if (i_prover < pivot) { placeholder as $pre as @prover } else { origrow_pre[(start as $pre + i_prover - pivot) as u64] } }
+  };
+  check_ext_amount(ref row, start, finish, aip, ext_amount, placeholder);
+  ext_amount
+}
+
+// Auxiliary function that decides if the given row of account statement expresses an income
+fn is_income(ref row : Store[N, $post, @prover], commas : list[uint[N] $post @prover], aip : AccountItemPos) -> bool[N] $post @prover where Field[N] {
+  let mut real_ind = find_start_pos(aip.dc, commas);
+  real_ind = real_ind + 1;
+  eq(row{#real_ind}, 67)
+}
+
+// Computed by compiler
+// Input: Lists of good country codes and bad country codes
+// Output: Characteristic list of good and bad countries (a position contains 1 or -1 if the country with that number is good or bad, respectively, and 0 otherwise)
+fn goodbad_as_set(good_countries : list[list[uint[N] $pre @public]], bad_countries : list[list[uint[N] $pre @public]]) -> list[uint[N] $pre @public] where Field[N] {
+  let mut res = for cc in 0 .. 26 * 26 + 1 { 0 };
+  for i in 0 .. length(good_countries) { res[country_number(good_countries[i]) as u64] = 1 };
+  for i in 0 .. length(bad_countries) { res[country_number(bad_countries[i]) as u64] = -1 };
+  res
+}
+
+// Circuit computation
+// Input: A country code; The characteristic set of good and bad countries in the form of a store
+// Output: A boolean telling if the given country is good or not
+fn is_good(xs : list[uint[N] $post @prover], ref countries_sto : Store[N, $post, @prover]) -> bool[N] $post @prover where Field[N] {
+  is_zero(countries_sto{#(country_number(xs))} - 1)
+}
+
+// Circuit computation
+// Input: A country code; The characteristic set of good and bad countries in the form of a store
+// Output: A boolean telling if the given country is bad or not
+fn is_bad(xs : list[uint[N] $post @prover], ref countries_sto : Store[N, $post, @prover]) -> bool[N] $post @prover where Field[N] {
+  is_zero(countries_sto{#(country_number(xs))} + 1)
+}
+
+fn read_country(ref row : Store[N, $post, @prover], commas : list[uint[N] $post @prover], aip : AccountItemPos) -> list[uint[N] $post @prover] where Field[N] {
+  let mut real_ind = find_start_pos(aip.beneficiary, commas);
+  for i in 0 .. 2 {
+    real_ind = real_ind + 1;
+    row{#real_ind}
+  }
+}
+
+fn read_number(ref row : Store[N, $post, @prover], ref real_ind : uint[N] $post @prover, num_len : u64 $pre @public) -> uint[N] $post @prover where Field[N] {
+  let mut res = 0;
+  for i in 0 .. num_len {
+    real_ind = real_ind + 1;
+    let digit = row{#real_ind} - 48;
+    res = res * 10 + digit;
+  };
+  real_ind = real_ind + 1;
+  res
+}
+
+fn read_date(ref row : Store[N, $post, @prover], commas : list[uint[N] $post @prover], aip : AccountItemPos) -> Date[$post, @prover, N] where Field[N] {
+  let mut real_ind = find_start_pos(aip.date, commas);
+  let day = read_number(ref row, ref real_ind, 2);
+  let month = read_number(ref row, ref real_ind, 2);
+  let year = read_number(ref row, ref real_ind, 4);
+  date(year, month, day)
+}
+
+fn is_date_in_interval(ref row : Store[N, $post, @prover], commas : list[uint[N] $post @prover], aip : AccountItemPos, bgn : Date[$post, @prover, N], end : Date[$post, @prover, N], ref sizeasserter : SizeAsserter[N, $post, @prover]) -> bool[N] $post @prover where Field[N] {
+  let date = read_date(ref row, commas, aip);
+  date_le3(bgn, date, ref sizeasserter) & date_le3(date, end, ref sizeasserter)
+}
+
+// Output: The record of positions of important fields in a row of any account statement
+fn account_item_pos_gen() -> AccountItemPos {
+  let client = get_public("client_pos");
+  let date = get_public("date_pos");
+  let beneficiary = get_public("beneficiary_pos");
+  let dc = get_public("dc_pos");
+  let amount = get_public("amount_pos");
+  AccountItemPos 
+  { client : client
+  , date : date
+  , beneficiary : beneficiary
+  , dc : dc
+  , amount : amount
+  }
+}
+
+// Circuit computation
+// Input: List of all characters of account statement; The same split into rows, as a list of list of characters
+// Checks if the former contains newline characters in the intermediate positions
+fn check_stmtrows(stmtchars : list[uint[N] $post @prover], stmtrows : list[list[uint[N] $post @prover]]) where Field[N] {
+  let mut a = 0;
+  for k in 0 .. length(stmtrows) {
+    assert_zero(stmtchars[a + length(stmtrows[k])] - 10);
+    a = a + length(stmtrows[k]) + 1
+  };
+  for i in a .. length(stmtchars) { assert_zero(stmtchars[i] - 10) };
+}
+
+fn verify_sums(stmtrows : list[list[uint[N] $post @prover]], client : list[uint[N] $post @public], aip : AccountItemPos, ref countries_sto : Store[N, $post, @prover], big_amount : uint[N] $post @public, good_floor : uint[N] $post @public, bad_ceiling : uint[N] $post @public, big_ceiling : uint[N] $post @public, decimal_separator : uint[N] $post @public, placeholder : uint[N] $post @public, bgn_public : Date[$pre, @public, N], end_public : Date[$pre, @public, N], pos_length : u64 $pre @public, amount_length : u64 $pre @public, ref sizeasserter : SizeAsserter[N, $post, @prover]) where Field[N] {
+  let mut date_sizeasserter = date_sizeasserter_new();
+  let bgn = date_to_prover(date_to_post(bgn_public));
+  let end = date_to_prover(date_to_post(end_public));
+  let big_amount_bits = check_size(big_amount as @prover, ref sizeasserter);
+  let mut total_income : uint[N] $post @prover = 0;
+  let mut good_income : uint[N] $post @prover = 0;
+  let mut bad_income : uint[N] $post @prover = 0;
+  let mut big_income : uint[N] $post @prover = 0;
+  for k in 1 .. length(stmtrows) {
+    let mut stmt = store_new(true, true, false);
+    for i in 0 .. length(stmtrows[k]) { stmt{#((wire { i as uint[N] }) as @prover)} = stmtrows[k][i] };
+    let commas = find_comma_pos(stmtrows[k], pos_length);
+    check_client(ref stmt, commas, aip, client);
+    let ext_amount = extend_amount(stmtrows[k], ref stmt, commas, aip, placeholder, amount_length);
+    let amount = read_amount(ext_amount, decimal_separator, placeholder);
+    let income_flag = is_income(ref stmt, commas, aip);
+    let date_flag = is_date_in_interval(ref stmt, commas, aip, bgn, end, ref date_sizeasserter);
+    let flag = income_flag & date_flag;
+    let country = read_country(ref stmt, commas, aip);
+    total_income = total_income + flag as uint[N] * amount;
+    good_income = good_income + (flag & is_good(country, ref countries_sto)) as uint[N] * amount;
+    bad_income = bad_income + (flag & is_bad(country, ref countries_sto)) as uint[N] * amount;
+    big_income = big_income + (flag & ge3'(check_size(amount, ref sizeasserter), big_amount_bits, ref sizeasserter)) as uint[N] * amount;
+  };
+  assert_ge(good_income * 100, good_floor as @prover * total_income, ref sizeasserter);
+  assert_lt(bad_income * 100, bad_ceiling as @prover * total_income, ref sizeasserter);
+  assert_le(big_income * 100, big_ceiling as @prover * total_income, ref sizeasserter);
+}
+
+fn main() where Field[N], Vectorization {
+  let decimal_separator : uint[N] $post @public = wire { get_public("decimal_separator") };
+  let placeholder : uint[N] $post @public = wire { get_public("placeholder") };
+  let pos_length : u64 $pre @public = get_public("pos_length");
+  let amount_length : u64 $pre @public = get_public("amount_length");
+  let client_pre : list[uint[N] $pre @public] $pre @public = get_public("client");
+  let client = for i in 0 .. length(client_pre) { wire { client_pre[i] } };
+  let good_countries_pre : list[list[uint[N] $pre @public]] = get_public("good_countries");
+  let bad_countries_pre : list[list[uint[N] $pre @public]] = get_public("bad_countries");
+  let countries_set = goodbad_as_set(good_countries_pre, bad_countries_pre);
+  let mut countries_sto : Store[N, $post, @prover] = store_new(true, true, false);
+  for i in 0 .. length(countries_set) { countries_sto{#((wire { i as uint[N] }) as @prover)} = (wire { countries_set[i] }) as @prover };
+  let aip = account_item_pos_gen();
+  let big_amount = wire { get_public("big_amount") };
+  let good_floor : uint[N] $post @public = wire { get_public("good_floor") };
+  let bad_ceiling : uint[N] $post @public = wire { get_public("bad_ceiling") };
+  let big_ceiling = wire { get_public("big_ceiling") };
+  let bgn_year = get_public("bgn_year");
+  let bgn_month = get_public("bgn_month");
+  let bgn_day = get_public("bgn_day");
+  let bgn_date : Date[$pre, @public, N] = date(bgn_year, bgn_month, bgn_day);
+  let end_year = get_public("end_year");
+  let end_month = get_public("end_month");
+  let end_day = get_public("end_day");
+  let end_date : Date[$pre, @public, N] = date(end_year, end_month, end_day);
+  let stmt_length : u64 $pre @public = get_public("stmt_length");
+  let stmtrow_lengths : list[u64 $pre @public] = get_public("stmtrow_lengths");
+  let stmtchars_length : u64 $pre @public = get_public("stmtchars_length");
+  let stmtchars_pre : list[uint[N] $pre @prover] $pre @prover = get_witness("stmtchars");
+  let stmtchars = for i in 0 .. stmtchars_length { wire { stmtchars_pre[i as @prover] } };
+  let stmtrows = lines(stmtchars, stmtrow_lengths, stmt_length);
+  check_stmtrows(stmtchars, stmtrows);
+  let mut sizeasserter = sizeasserter_new(log2(N) as u64 - 2);
+  verify_sums(stmtrows, client, aip, ref countries_sto, big_amount, good_floor, bad_ceiling, big_ceiling, decimal_separator, placeholder, bgn_date, end_date, pos_length, amount_length, ref sizeasserter);
+}

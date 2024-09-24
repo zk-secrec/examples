@@ -1,0 +1,18 @@
+use Std::*;
+
+fn main() where Field[37], Vectorization {
+    let bits : arr[uint[37] $post @prover] = array_to_post(freeze([1,0,1,1]));
+    let bits2 : arr[uint[37] $post @prover] = unflatten(bits, [2,2]);
+    let bits3 : arr[uint[37] $post @prover] = flatten(bits2);
+    let bits4 : arr[uint[37] $post @prover] = unflatten(array_to_post(freeze([2,3,4,5,6,7])), [2,3]);
+    let bits5 : arr[uint[37] $post @prover] = index_tensor_1(bits4, 1);
+    let bits6 : arr[uint[37] $post @prover] = bits4[1..];
+    let bits7 : arr[uint[37] $post @prover] = bits4 +. bits4;
+    assert_zero(bits5[1] - 6);
+    assert_zero(index_tensor(bits6, [0, 2]) - 7);
+    assert_zero(index_tensor(bits7, [1, 1]) - 12);
+    let y : uint[37] $post @prover = index_tensor(bits4, [0,1]);
+    assert_zero(y - 3);
+    let s : list[u64 $pre @public] = size(bits4);
+    dbg_assert(s[0] == 2 & s[1] == 3);
+}

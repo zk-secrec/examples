@@ -1,0 +1,71 @@
+// For testing, run
+//   stack exec zkscc -- docs/example_circuit_hash.zksc --debug-print-sieve-ir --enable-ir-optimizations -m 2 -c circuits -i docs/example_hash_instance.json -w docs/example_hash_witness.json --check-sieve
+// in the compiler directory.
+
+use Integer::*;
+use Bitextract::*;
+
+type N : Nat = 2;
+
+fn boolArrayToProver[N : Nat, $S, @D](xs : list[bool[N] $S @D]) -> list[bool[N] $S @prover] {
+    for i in 0 .. length(xs) { xs[i] as @prover }
+}
+
+// all elements of xss must have the same length and xss must not be empty
+fn concatBools[N : Nat, $S, @D](xss : list[list[bool[N] $S @D]]) -> list[bool[N] $S @D] {
+    let m = length(xss);
+    let n = length(xss[0]);
+    for i in 0 .. m*n {
+        xss[i/n][i%n]
+    }
+}
+
+fn reverseBools[N : Nat, $S, @D](xs : list[bool[N] $S @D]) -> list[bool[N] $S @D] {
+    let n = length(xs);
+    for i in 0 .. n {
+        xs[n-1-i]
+    }
+}
+
+fn uint_to_bools[@D](x : uint $pre @D) -> list[bool[N] $pre @D] {
+    let l = bitextract_pre(x, 64);
+    for i in 0 .. 64 { l[i] as bool[N] }
+}
+
+// in input, the most significant bit is the first bit of the first word
+// in output, the most significant bit is the last bit
+fn bigendian_uints_to_littleendian_bools[@D](xs : list[uint $pre @D]) -> list[bool[N] $pre @D] {
+    reverseBools(
+	concatBools(
+	    for i in 0 .. length(xs) {
+		// uint_to_bools is little-endian, so need to reverse it
+		reverseBools(uint_to_bools(xs[i]))
+	    }
+	)
+    )
+}
+
+fn main() where Field[N] {
+    // The target hash value. The prover must prove that it knows a message hashing to this value.
+    let hash_pre : list[uint $pre @verifier] $pre @verifier = get_instance("hash");
+    let hash_pre_publen : list[uint $pre @verifier] $pre @public = for i in 0 .. 8 { hash_pre[i as @verifier] };
+    let hashb_verifier_pre = bigendian_uints_to_littleendian_bools(hash_pre_publen);
+    let hashb_verifier = for i in 0 .. length(hashb_verifier_pre) { wire { hashb_verifier_pre[i] } };
+    let hashb = boolArrayToProver(hashb_verifier);
+
+    let msg_pre : list[uint $pre @prover] $pre @prover = get_witness("message");
+    let msg_pre_publen : list[uint $pre @prover] $pre @public = for i in 0 .. 16 { msg_pre[i as @prover] };
+    let msgb_pre = bigendian_uints_to_littleendian_bools(msg_pre_publen);
+    let msgb = for i in 0 .. length(msgb_pre) { wire { msgb_pre[i] } };
+
+    // The initial hash values for SHA-512:
+    let inits : list[uint $pre @prover] = [0x6a09e667f3bcc908, 0xbb67ae8584caa73b, 0x3c6ef372fe94f82b, 0xa54ff53a5f1d36f1, 0x510e527fade682d1, 0x9b05688c2b3e6c1f, 0x1f83d9abfb41bd6b, 0x5be0cd19137e2179];
+    let initsb_pre = bigendian_uints_to_littleendian_bools(inits);
+    let initsb = for i in 0 .. length(initsb_pre) { wire { initsb_pre[i] } };
+
+    let digestb = call("sha512", [msgb,initsb])[0];
+    for i in 0 .. 512 {
+	assert(!xor(hashb[i], digestb[i]));
+    }
+    {}
+}

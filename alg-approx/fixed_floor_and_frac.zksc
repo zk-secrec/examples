@@ -1,0 +1,85 @@
+use FixedPoint::*;
+use Integer::*;
+use Inequalities::*;
+use Std::*;
+
+fn quot_rem_unchecked[N : Nat, @D](
+  x: uint[N] $pre @D,
+  y: uint[N] $pre @D
+) -> tuple[uint[N] $pre @D, uint[N] $pre @D]
+where Field[N]
+{
+  let q = div_signed(x,y);
+  let r = x - y*q;
+  (q,r)
+}
+
+// Assumes sizeasserter limit
+// is even.
+fn check_quot_rem3[N : Nat]
+(
+  x: uint[N] $post @prover,
+  y: uint[N] $post @prover,
+  q: uint[N] $post @prover,
+  r: uint[N] $post @prover,
+  ref sizeasserter: SizeAsserter[N, $post, @prover]
+)
+where Field[N]
+{
+  let reconstructed_x = q*y + r;
+  assert_zero(x - reconstructed_x);
+  let halflim: uint[N] $pre @public = (sizeasserter.lim/2) as uint[N];
+  let trash = check_size(q + uint_downcast(halflim) as @prover, ref sizeasserter);
+  let y_sign: uint[N] $post @prover = wire { if (y as $pre as uint >= N/2) {-1} else {1} };
+  assert_zero(y_sign * y_sign - 1);
+  let y_abs = y * y_sign;
+  assert_lt(r, y_abs, ref sizeasserter);
+}
+
+// given x = q*y + r with 0 <= r < y, returns (q,r)
+// Sizeasserter needs to ensure that no overflow occurs
+// with the multiplication, which means the limit's bitwidth
+// must be less than half of log2(N). Sizeasserter
+// limit must also be even.
+// x and y are assumed to be signed, so in the
+// range [-L/2, (L/2)-1] where L is the sizeasserter
+// limit. We really just want L^2 < N.
+pub fn quot_rem3[N: Nat, $S, @D](
+  x: uint[N] $S @D,
+  y: uint[N] $S @D,
+  ref sizeasserter: SizeAsserter[N, $S, @D]
+) -> tuple[uint[N] $S @D, uint[N] $S @D]
+where Field[N]
+{
+  let tt = quot_rem_unchecked(x as $pre, y as $pre);
+  let q_pre = tt.0;
+  let r_pre = tt.1;
+  let q = uint_downcast(q_pre);
+  let r = uint_downcast(r_pre);
+  if (post $S) {
+    if (@prover <= @D) {
+      check_quot_rem3(x,y,q,r, ref sizeasserter);
+    }
+  }
+  (q,r)
+}
+
+// computes (floor(x), x-floor(x))
+pub fn fixed_floor_and_frac[N:Nat, $S, @D](
+  x: Fixed[N, $S, @D],
+  ref sizeasserters: list[SizeAsserter[N, $S, @D]]
+) -> tuple[uint[N] $S @D, Fixed[N, $S, @D]]
+where Field[N]
+{
+  let ppval: uint[N] $S @public = uint_downcast(pow_pre_inf(2, x.pplen) as uint[N]);
+  let qr = quot_rem3(x.coef, ppval as @D, ref sizeasserters[x.len]);
+  let q = qr.0;
+  let r = qr.1;
+  let resized_floorval = Fixed {
+    coef: q * ppval as @D,
+    len: x.len,
+    pplen: x.pplen
+  };
+  let fracval = sub_fixed3(x, resized_floorval, ref sizeasserters);
+  (q, fracval)
+}

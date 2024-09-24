@@ -1,0 +1,36 @@
+use Std::*;
+use Integer::*; // log2
+use Inequalities::*;
+use BigInt::*;
+use EC::*;
+
+type N : Nat = 0x1fffffffffffffff;
+
+// Some tests to ensure that everything works fine
+fn main() where Field[N] {
+  let mut sizeasserters = sizeasserters_new((log2(N) as u64) - 1);
+  let x : BigInt[N, $post, @prover] = BigInt_to_post(BigInt_from_uint(11111, 1, 14));
+  dbg_print("x: " ++ BigInt_to_string(x));
+  dbg_print("x: " ++ to_string(BigInt_to_uint(x)));
+  let y : BigInt[N, $post, @prover] = BigInt_to_post(BigInt_from_uint(-11111, 1, 14));
+  dbg_print("y: " ++ BigInt_to_string(y));
+  dbg_print("y: " ++ to_string(BigInt_to_uint(y)));
+  let z : BigInt[N, $post, @prover] = BigInt_to_post(BigInt_from_uint(-123454321, 2, 14));
+  dbg_print("z: " ++ BigInt_to_string(z));
+  dbg_print("z: " ++ to_string(BigInt_to_uint(z)));
+  let mul = BigInt_mul(x, y);
+  BigInt_assert_eq(
+    mul,
+    z,
+    ref sizeasserters
+  );
+
+  let zz = BigInt_normalize_post(BigInt_mul(z, z), ref sizeasserters);
+  dbg_print("zz: " ++ BigInt_to_string(zz));
+  dbg_print("zz: " ++ to_string(BigInt_to_uint(zz)));
+  dbg_print("zz should be " ++ to_string(((123454321) : uint $pre @public) * ((123454321) : uint $pre @public)));
+
+  let a : BigInt[N, $post, @prover] = BigInt_to_post(BigInt_from_uint(17, 1, 14));
+  let b : BigInt[N, $post, @prover] = BigInt_to_post(BigInt_from_uint(101, 1, 14));
+  let c = BigInt_mod_div(x, y, N, ref sizeasserters);
+}

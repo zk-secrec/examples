@@ -1,0 +1,258 @@
+use FixedPoint::*;
+use Std::*;
+use Integer::*;
+use Inequalities::*;
+
+// NB!!!!
+// The soundness of everything here depends on the inequality N >= 2^(2L) + 2^(L-1),
+// due to a check in check_coef_implicit_algebraic_function.
+// This is stricter than required for other fixed point procedures.
+
+// Additionally, the uints arithmetic must be kept in sync with FixedPoint
+// arithmetic. This is because currently, FixedPoint with infinite modulus is
+// unavailable.
+
+// So, what are the pros and cons of doing the uintN part with fixedpoints instead?
+// Pros: Less code duplication, more ergonomic with a single sizeasserter
+// Cons: Maybe worse perf, higher likelihood of uints and uintN becoming decoupled.
+
+fn fixed_domain_upward[N : Nat, $S, @DL, @DH](x: Fixed[N, $S, @DL]) -> Fixed[N, $S, @DH]
+where @DL <= @DH {
+  Fixed {
+    coef: x.coef as @DH,
+    len: x.len,
+    pplen: x.pplen
+  }
+}
+
+// Maybe bad by effects, so don't use (?)
+// fn fixed_general_downcast[N : Nat, $S1, $S2, @D](x: Fixed[N, $S1, @D]) -> Fixed[N, $S2, @D]
+// where Field[N]
+// {
+//   if (pre $S1) {
+//     fixed_downcast(x)
+//   } else {
+//     if (pre $S2) {
+//       univ_assert(false: bool[N] $pre @public);
+//       Fixed {coef: x.coef as $pre, len: x.len, pplen:x.pplen}
+//     } else {
+//       Fixed {coef: uint_ensure_post(x.coef), len: x.len, pplen:x.pplen}
+//     }
+//   }
+// }
+
+fn fixed_ensure_post[N : Nat, $S, @D](x: Fixed[N, $S, @D]) -> Fixed[N, $post, @D]
+where Field[N]
+{
+  Fixed {
+    coef: uint_ensure_post(x.coef),
+    len: x.len,
+    pplen: x.pplen
+  }
+}
+
+pub fn implicit_algebraic_function_fixed[N : Nat, $S, $SL, @D, @DL](
+  x : Fixed[N, $S, @D],
+  coeffs : list[list[Fixed[N, $pre, @public]]],
+  lowerlimit : Fixed[N, $SL, @DL],
+  upperlimit : Fixed[N, $SL, @DL],
+  ref sizeasserters: list[SizeAsserter[N, $S, @D]]
+  ) -> Fixed[N, $S, @D]
+  where Field[N], @DL <= @D {
+  let lpre : Fixed[N, $pre, @D] = fixed_domain_upward(fixed_pre(lowerlimit));
+  let upre : Fixed[N, $pre, @D] = fixed_domain_upward(fixed_pre(upperlimit));
+  let res_pre = implicit_algebraic_function_fixed_pre(fixed_pre(x), coeffs, lpre, upre);
+  if (post $S) {
+    let lpost : Fixed[N, $post, @D] = fixed_domain_upward(fixed_ensure_post(lowerlimit));
+    let upost : Fixed[N, $post, @D] = fixed_domain_upward(fixed_ensure_post(upperlimit));
+    let res = fixed_downcast(res_pre);
+    if (@prover <= @D) {
+      // max(0, (X-1)(1+P+L)) + 3Y(P+L) + 2Y + P + 3L + 1
+      check_coef_implicit_algebraic_function(x, res, coeffs, ref sizeasserters);
+      // 8L + ...
+      assert(fixed_between_pp(res, lpost, upost, ref sizeasserters));
+    }
+    res
+  } else {
+    res_pre
+  }
+}
+
+fn fixed_between_pp[N : Nat, @D](
+  res : Fixed[N, $post, @D],
+  lowerlimit: Fixed[N, $post, @D],
+  upperlimit: Fixed[N, $post, @D],
+  ref sizeasserters: list[SizeAsserter[N, $post, @D]]
+) -> bool[N] $post @D
+where Field[N] {
+  le_fixed3((lowerlimit), res, ref sizeasserters) & le_fixed3(res, (upperlimit), ref sizeasserters)
+}
+
+/*
+Returns the coefficients of one-variable polynomial f(y) = F(x,y)
+*/
+fn partially_evaluate_two_variable_poly_fixed[N : Nat, $S, @D](
+  x : Fixed[N, $S, @D],
+  coeffs : list[list[Fixed[N, $pre, @public]]],
+  ref sizeasserters: list[SizeAsserter[N, $S, @D]]
+) -> list[Fixed[N, $S, @D]]
+  where Field[N] {
+  let xmaxdeg = length(coeffs) - 1;
+  let ymaxdeg = length(coeffs[0]) - 1;
+  let rec xpwrs : list[Fixed[N, $S, @D]] = for i in 0 .. xmaxdeg + 1 {
+    if(i == 0) {
+      uint_to_fixed3(1 : uint[N] $S @D, x.len, x.pplen, ref sizeasserters)
+    }
+    else if(i == 1) {
+      x
+    }
+    else {
+      mult_fixed3(x, xpwrs[i-1], ref sizeasserters)
+    }
+  };
+  for j in 0 .. ymaxdeg + 1 {
+    let mut r : Fixed[N, $S, @D] = uint_to_fixed3(0 : uint[N] $S @D, x.len, x.pplen, ref sizeasserters);
+    for i in 0 .. xmaxdeg + 1 {
+      r = add_fixed3(r, mult_fixed3(xpwrs[i], fixed_domain_upward(fixed_downcast(coeffs[i][j])), ref sizeasserters), ref sizeasserters);
+    };
+    r
+  }
+}
+
+pub fn eval_single_variable_poly_fixed[N : Nat, $S, @D](
+  x : Fixed[N, $S, @D],
+  coeffs : list[Fixed[N, $S, @D]],
+  ref sizeasserters: list[SizeAsserter[N, $S, @D]]
+  ) -> Fixed[N, $S, @D]
+  where Field[N] {
+    let xmaxdeg = length(coeffs) - 1;
+    let mut r = coeffs[xmaxdeg];
+    for j in 0 .. xmaxdeg {
+      r = add_fixed3(mult_fixed3(r, x, ref sizeasserters), coeffs[xmaxdeg - j - 1], ref sizeasserters);
+    };
+    r
+}
+
+// uint[N] is interpreted as values in the range -N/2 .. N-N/2+1 instead of 0 .. N-1
+fn signed_uintN_to_uint[N : Nat, @D](x : uint[N] $pre @D) -> uint $pre @D {
+  // N/2 is temporarily added to make negative numbers positive, so that they are converted correctly
+  // N/2 needs to computed in uint as N would be zero in uint[N]
+  ((x + (((N : uint $pre @D)/2) as uint[N])) as uint) - N/2
+}
+
+fn fixed_to_signed_coef[N : Nat, @D](x : Fixed[N, $pre, @D]) -> uint $pre @D
+where Field[N]
+{
+  signed_uintN_to_uint(x.coef)
+}
+
+// The effect complaint is coming from `let mval = eval_single_variable_poly_with_uints(...)`. Not sure why.
+// Maybe this is just the effect solver being weak, but this should be verified manually.
+fn implicit_algebraic_function_with_uints_helper[@D](fxcoeffs : list[uint $pre @D], l : uint $pre @D, lval : uint $pre @D, r : uint $pre @D, rval : uint $pre @D, len : u64 $pre @public, pplen : u64 $pre @public) -> uint $pre @D {
+  dbg_print("iafu_helper start" : string $pre @public);
+  dbg_print(to_string(l) ++ (" " ++ (to_string(lval) ++ (" " ++ (to_string(r) ++ (" " ++ (to_string(rval))))))));
+  if(lval == 0) { l }
+  else if(rval == 0) { r }
+  else if(r - l <= 1) { l }
+  else {
+    let m = (l+r) / 2;
+    let mval = eval_single_variable_poly_with_uints(m , fxcoeffs, len, pplen);
+    if(((lval > 0) & (mval >= 0)) | ((lval < 0) & (mval <= 0))) {
+      dbg_print("going right" : string $pre @public);
+      implicit_algebraic_function_with_uints_helper(fxcoeffs, m, mval, r, rval, len, pplen)
+    }
+    else {
+      dbg_print("going left" : string $pre @public);
+      implicit_algebraic_function_with_uints_helper(fxcoeffs, l, lval, m, mval, len, pplen)
+    }
+  }
+}
+
+// On reflection, this function seems to sorta already be doing what I was describing in my comment above
+// Trouble is that it requires $pre stage
+fn eval_single_variable_poly_with_uints[@D](y : uint $pre @D, fxcoeffs : list[uint $pre @D], len : u64 $pre @public, pplen : u64 $pre @public) -> uint $pre @D {
+    dbg_print("esvp_uints" : string $pre @public);
+    let ymaxdeg = length(fxcoeffs) - 1;
+    let mut r = fxcoeffs[ymaxdeg];
+    dbg_print(to_string(ymaxdeg as @D) ++ ((" " : string $pre @D) ++ to_string(r)));
+    for j in 0 .. ymaxdeg {
+      r = uints_shift_right(r * y, pplen) + fxcoeffs[ymaxdeg - j - 1];
+      dbg_print(to_string((ymaxdeg-j-1) as @D) ++ ((" " : string $pre @D) ++ to_string(r)));
+    };
+    r
+}
+
+fn uints_shift_right[@D](r : uint $pre @D, pplen : u64 $pre @public) -> uint $pre @D {
+  r / pow_pre_inf(2, pplen)
+}
+
+fn poly_root_finder_pre[N : Nat, @D](
+  coeffs: list[Fixed[N, $pre, @D]],
+  l: Fixed[N, $pre, @D],
+  r: Fixed[N, $pre, @D],
+) -> Fixed[N, $pre, @D]
+where Field[N] {
+  let raised_coeffs = for i in 0..length(coeffs) {fixed_domain_upward(coeffs[i])};
+  let len = coeffs[0].len;
+  let pplen = coeffs[0].pplen;
+
+  let coeffsu = for i in 0..length(coeffs) {fixed_to_signed_coef(raised_coeffs[i])};
+  let lu = fixed_to_signed_coef(l);
+  let ru = fixed_to_signed_coef(r);
+  let lval = eval_single_variable_poly_with_uints(lu, coeffsu, len, pplen);
+  let rval = eval_single_variable_poly_with_uints(ru, coeffsu, len, pplen);
+  let rescoef = implicit_algebraic_function_with_uints_helper(coeffsu, lu, lval, ru, rval, len, pplen);
+  fixed(rescoef as uint[N], len, pplen)
+}
+
+/*
+Returns a value y, such that F(x,y) and F(x,y+singleunit) either have different signs, or F(x,y) == 0
+In the future, change the implementation onto uints
+*/
+fn implicit_algebraic_function_fixed_pre[N : Nat, @D](
+  x : Fixed[N, $pre, @D],
+  coeffs : list[list[Fixed[N, $pre, @public]]],
+  lowerlimit : Fixed[N, $pre, @D],
+  upperlimit : Fixed[N, $pre, @D]
+) -> Fixed[N, $pre, @D]
+  where Field[N] {
+  let mut sizeasserters_pre = sizeasserters_new(x.len+1);
+  let fxcoeffs = partially_evaluate_two_variable_poly_fixed(x, coeffs, ref sizeasserters_pre);
+  poly_root_finder_pre(fxcoeffs, lowerlimit, upperlimit)
+}
+
+fn eval_two_variable_poly_fixed[N : Nat, $S, @D](
+  x : Fixed[N, $S, @D],
+  ys : list[Fixed[N, $S, @D]],
+  coeffs : list[list[Fixed[N, $pre, @public]]],
+  ref sizeasserters: list[SizeAsserter[N, $S, @D]]
+) -> list[Fixed[N, $S, @D]]
+  where Field[N] {
+  let fxcoeffs = partially_evaluate_two_variable_poly_fixed(x, coeffs, ref sizeasserters);
+  for k in 0 .. length(ys) {
+    eval_single_variable_poly_fixed(ys[k], fxcoeffs, ref sizeasserters)
+  }
+}
+
+// Possibly misleading name - this checks whether the triple (F, x, res) satisfies the condition
+// that F(x, res) = 0 or sign(F(x, res)) != sign(F(x, res+1)) where F is given by coeffs
+// max(0, (X-1)(1+P+L)) + 3Y(P+L) + 2Y + P + 3L + 1
+// old: max(0, (X-2)(1+P+L)) + 3Y(P+L) + 2Y + P + L + ...
+fn check_coef_implicit_algebraic_function[N : Nat, @D](
+  x : Fixed[N, $post, @D],
+  res : Fixed[N, $post, @D],
+  coeffs : list[list[Fixed[N, $pre, @public]]],
+  ref sizeasserters: list[SizeAsserter[N, $post, @D]]
+)
+  where Field[N] {
+    dbg_print("Checking coefficients" : string $pre @public);
+    dbg_print((fixed_to_string(x) ++ " ") ++ fixed_to_string(res));
+
+    let resnext = fixed3(res.coef + 1, res.len, res.pplen, ref sizeasserters);
+
+    let vs = eval_two_variable_poly_fixed(x, [res,resnext], coeffs, ref sizeasserters);
+    dbg_print((fixed_to_string(vs[0]) ++ " ") ++ fixed_to_string(vs[1]));
+    // TODO: Optimize this check
+    let zero_pub = Fixed { coef: 0, len: res.len, pplen: res.pplen};
+    assert(le_fixed3(mult_fixed3(vs[0], vs[1], ref sizeasserters), zero_pub, ref sizeasserters));
+}

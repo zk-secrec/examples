@@ -1,0 +1,17 @@
+//type N : Nat = 1030307;
+type N : Nat = 0x1fffffffffffffff;
+
+fn sum[@D](xs : list[uint[N] $post @D]) -> uint[N] $post @D {
+    let rec sums = for i in 0 .. length(xs)+1 { if (i==0) {0} else {sums[i-1] + xs[i-1]} };
+    sums[length(xs)]
+}
+
+fn main() where Field[N] {
+    let xs1 : list[uint[N] $post @verifier] = [1,2,3,4];
+    let y1 = sum(xs1);
+    assert_zero(y1 - 10);
+    let xs2 : list[uint[N] $post @prover] = [1,2,3,4];
+    let y2 = sum(xs2);
+    assert_zero(y2 - 10);
+    {}
+}

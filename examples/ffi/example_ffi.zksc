@@ -1,0 +1,230 @@
+// For testing, run
+//   ./runrust docs/example_ffi.zksc -e docs/example_ffi.rs
+// in the compiler directory.
+
+/*
+Foreign Function Interface
+
+Foreign Function Interface (FFI) in ZK-SecreC allows calling Rust functions from ZKSC code.
+The Rust functions must be declared as extern functions in ZKSC code and implemented in a Rust file.
+The -e parameter of runrust specifies the Rust file that implements the extern functions declared in the ZKSC file.
+Any Rust compiler errors from that Rust file will reference src/Rust/zksc-app-lib/src/externs.rs,
+which is where the Rust file is copied to, but the line numbers in the error messages are correct.
+
+The correspondence between ZKSC and Rust types when using FFI:
+ZK-SecreC              Rust
+--------------------------------------------------------------------------
+() $pre @D             ()
+bool $pre @D           bool
+bool[N] $pre @D        bool
+u8 $pre @D             u8
+u16 $pre @D            u16
+u32 $pre @D            u32
+u64 $pre @D            u64
+u128 $pre @D           u128
+uint $pre @D           BigInt
+uint[N] $pre @D        Value if N is not 2^8,2^16,2^32,2^64,2^128,infinite
+string $pre @D         String
+T : Qualified          Value
+list[() $pre @D]       Value
+arr[() $pre @D]        Value
+list[T] or arr[T]      Vec<T'> if T' is bool,u8,u16,u32,u64,u128
+list[T] or arr[T]      Vec<Value> if T' is not (),bool,u8,u16,u32,u64,u128
+tuple[T1,T2]           (T1',T2') if not a ref argument
+tuple[T1,T2,T3]        (T1',T2',T3') if not a ref argument
+tuple[T1,T2,T3,T4]     (T1',T2',T3',T4') if not a ref argument
+tuple[T1,T2,T3,T4,T5]  (T1',T2',T3',T4',T5') if not a ref argument
+tuple[T1,...,Tn]       Box<[Value]>
+struct                 Box<[Value]>
+store[T1,T2] $S @D     Value
+
+In the above table, T' is the Rust type corresponding to the ZKSC type T (according to the same table).
+
+The Rust type Value represents a reference-counted ZK-SecreC value.
+
+(), bool, u8, u16, u32, u64, u128 are Rust primitive types. These (and vectors of them, e.g. Vec<u64>) are used
+for the corresponding ZKSC types also when translating ZK-SecreC code to Rust. The other Rust types (except Value)
+are used only with extern functions and are converted to/from Value when using extern functions.
+
+For non-primitive Rust types other than tuples, i.e. for Value, Vec, Box, BigInt, String,
+the Rust type must be prefixed by & when used for an argument of an extern function (e.g. &Value instead of Value)
+but not when used for a return value. The prefix is also used inside tuples (e.g. (&Value, &BigInt)).
+Primitive Rust types and Rust tuples are not prefixed when used as non-ref arguments.
+
+For ref arguments, the prefix is &mut. Rust tuples (e.g. (&mut Value, &mut BigInt)) cannot be used for ref arguments,
+instead &mut Box<[Value]> (or &mut Value) must be used for ref tuples regardless of the number of components.
+Primitive Rust types are prefixed with &mut when used as ref arguments.
+
+All the prefixed (borrowed) values can be cloned (using the method clone() in Rust) to get the non-prefixed (owned) value.
+This cloning is constant-time for Value (only increasing the reference count) but
+makes a copy of the whole data structure for Vec, Box, BigInt, and String.
+To avoid this copying, it is also possible to use Value (&Value for arguments, &mut Value for ref arguments)
+instead of these types when defining the Rust function. The Value, &Value, and &mut Value can be converted to/from
+the corresponding Rust types using the From and Into traits. There are examples of using the into() method of the Into trait
+in example_ffi.rs.
+
+The into() method is essential when implementing extern functions on multidimensional lists/arrays or lists/arrays of
+tuples/BigInts/Strings, as lists/arrays with non-primitive elements are always represented as Vec<Value> and
+the into() method needs to be used to convert the element Values to/from the corresponding Rust types. It is also needed
+for tuples translated as Box<[Value]>.
+
+Slices cannot be passed to extern functions. They can be removed (copying the elements of the slice to a new list/array)
+using the builtin unslice (e.g. unslice(xs[1..]) instead of xs[1..]).
+
+Boxed lists/arrays of primitive types cannot be passed to extern functions. These are created inside polymorphic functions
+where Rust type corresponding to the element type is not known and thus Value is used instead.
+When the Rust type corresponding to the element type is known and is primitive, the created list/array is always unboxed.
+Boxed lists/arrays can be turned into unboxed lists/arrays when the Rust type corresponding to the element type is known,
+using a for loop (e.g. for i in 0 .. length(xs) { xs[i] }).
+
+Extern functions are declared using the keyword extern and ending with a semicolon instead of the function body, e.g.
+    extern fn sqr[@D](x : u64 $pre @D) -> u64 $pre @D;
+
+
+Implementing Extern Functions in Rust
+
+The module crate::externs_header, which re-exports some essential types,
+needs to be imported in every Rust file implementing ZK-SecreC extern functions:
+    use crate::externs_header::*;
+
+Extern function implementations must use the pub keyword, so that they can be used from the ZK-SecreC code.
+The first two parameters must be of types &ContextRef and &mut Stack,
+the variables can be _ as they are usually not needed.
+The next parameters are the type parameters (other than Unqualified) of the ZK-SecreC function,
+the Rust type depends on the kind of the ZK-SecreC type parameter,
+according to the following table:
+  ZK-SecreC    Rust
+  -----------------------------------
+  domain(@)    DomainType
+  stage($)     StageType
+  Nat          &NatType
+  Qualified    QualifiedType
+  Unqualified  (no parameter in Rust)
+
+After that, there will be the ordinary parameters of the ZK-SecreC function.
+
+For the extern function sqr, we can have the following Rust implementation:
+    pub fn sqr(_: &ContextRef, _: &mut Stack, _d: DomainType, x: u64) -> u64 {
+        x * x
+    }
+Here, we have _d: DomainType corresponding to the @D in ZK-SecreC,
+and x: u64 corresponding to x : u64 $pre @D in ZK-SecreC.
+The variable names do not have to be the same as in ZK-SecreC.
+*/
+
+use Std::*;
+
+struct Pair {
+    x : u64 $pre @prover,
+    y : u128 $pre @prover,
+}
+
+// Extern functions are declared using the keyword extern and ending with a semicolon instead of the function body:
+extern fn sqr[@D](x : u64 $pre @D) -> u64 $pre @D;
+extern fn sqr_u128[@D](x : u128 $pre @D) -> u128 $pre @D;
+extern fn cond[@D](b : b64 $pre @D, x : u64 $pre @D, y : u64 $pre @D) -> u64 $pre @D;
+extern fn print_i128[@D](x : u128 $pre @D);
+extern fn flist(xs : list[bool $pre @prover]) -> list[bool $pre @prover];
+extern fn farr(xs : arr[u128 $pre @prover]) -> arr[u128 $pre @prover];
+extern fn flistlist(xs : list[list[u128 $pre @prover]]) -> list[list[u128 $pre @prover]];
+extern fn ftuple2(x : tuple[u64 $pre @prover, u128 $pre @prover])
+                   -> tuple[u64 $pre @prover, u128 $pre @prover];
+extern fn ftuple3(x : tuple[u64 $pre @prover, u128 $pre @prover, u128 $pre @prover])
+                   -> tuple[u64 $pre @prover, u128 $pre @prover, u128 $pre @prover];
+extern fn ftuple4(x : tuple[uint $pre @prover, u128 $pre @prover, bool $pre @prover, () $pre @public])
+                   -> tuple[uint $pre @prover, u128 $pre @prover, bool $pre @prover, () $pre @public];
+extern fn ftuple5(x : tuple[u64 $pre @prover, u128 $pre @prover, u8 $pre @prover, u16 $pre @prover, u32 $pre @prover])
+                   -> tuple[u64 $pre @prover, u128 $pre @prover, u8 $pre @prover, u16 $pre @prover, u32 $pre @prover];
+extern fn ftuple6(x : tuple[u64 $pre @prover, u128 $pre @prover, u8 $pre @prover, u16 $pre @prover, u32 $pre @prover, u64 $pre @prover])
+                   -> tuple[u64 $pre @prover, u128 $pre @prover, u8 $pre @prover, u16 $pre @prover, u32 $pre @prover, u64 $pre @prover];
+extern fn fnestedtuple1(x : tuple[tuple[u64 $pre @prover, u128 $pre @prover], u64 $pre @prover])
+                         -> tuple[tuple[u64 $pre @prover, u128 $pre @prover], u64 $pre @prover];
+extern fn fnestedtuple2(x : tuple[tuple[uint[31] $pre @prover, list[u128 $pre @prover], bool $pre @prover], u64 $pre @prover])
+                         -> tuple[tuple[uint[31] $pre @prover, list[u128 $pre @prover], bool $pre @prover], u64 $pre @prover];
+extern fn flisttuple(xs : list[tuple[u64 $pre @prover, u128 $pre @prover]]) -> list[tuple[u64 $pre @prover, u128 $pre @prover]];
+extern fn fstruct(x : Pair) -> Pair;
+extern fn fstring(x : string $pre @prover) -> string $pre @prover;
+extern fn reverse_list[T : Qualified](xs : list[T]) -> list[T];
+// Extern functions with ref arguments:
+extern fn fmutlist(ref xs : list[u128 $pre @prover]);
+extern fn fmutlistb[N : Nat, @D, @D2](ref xs : list[bool[N] $pre @D] $pre @D2);
+extern fn fmutlistlist(ref xs : list[list[u128 $pre @prover]]);
+extern fn fmuttuple6(ref x : tuple[u64 $pre @prover, u128 $pre @prover, u8 $pre @prover, u16 $pre @prover, u32 $pre @prover, u64 $pre @prover]);
+extern fn fmutlisttuple(ref xs : list[tuple[u64 $pre @prover, u128 $pre @prover]]);
+extern fn fmutbigint(ref x : uint $pre @prover);
+extern fn fmutstring(ref s : string $pre @prover);
+extern fn fmutu64(ref x : u64 $pre @prover);
+
+fn main() where Vectorization, Field[31] {
+    // Extern functions cannot use values of higher domain than the current context,
+    // unless the Rust functions implementing the externs use the type Value for those values,
+    // because these values might not be known by the current party
+    // and unknown values cannot be represented in types other than Value.
+    // Thus we force the context to @prover using an if-statement:
+    if (true : bool $pre @prover) {
+        // Statements inside this block are executed only by Prover.
+
+        let x : u64 $pre @prover = 5;
+        let y = sqr(x);
+        dbg_print(to_string(y));
+        let y = cond(x > 3, x*x, x);
+        dbg_print(to_string(y));
+
+        let x : u128 $pre @prover = 7;
+        dbg_assert_eq(sqr_u128(x), 49);
+        print_i128(x);
+        print_i128(1-x);
+
+        let xs = flist(flist([true, false, false, true]));
+        let xs = thaw(farr(farr(freeze([1, 2, 3]))));
+        let xss = flistlist(flistlist([[1, 2, 3], [4], [5, 6]]));
+        let x = ftuple2(ftuple2((5, 7)));
+        let x = ftuple3(ftuple3((6, 9, 8)));
+        let x = ftuple4(ftuple4((6, 9, true, {})));
+        let x = ftuple5(ftuple5((6, 9, 8, 1, 2)));
+        let x = ftuple6(ftuple6((6, 9, 8, 1, 2, 0)));
+        let x = fnestedtuple1(fnestedtuple1(((5, 8), 7)));
+        let x = fnestedtuple2(fnestedtuple2(((5, [8, 9], true), 7)));
+        let xs = flisttuple(flisttuple([(1, 2), (3, 4), (5, 6)]));
+        let x = fstruct(fstruct(Pair { x : 1, y : 2 }));
+        let x = fstring(fstring("Test"));
+
+        // Using extern functions with ref arguments:
+        let mut xs = [1,3,5];
+        fmutlist(ref xs);
+        fmutlist(ref xs);
+        let mut xs : list[bool $pre @prover] $pre @verifier = [true,false,false];
+        fmutlistb(ref xs);
+        fmutlistb(ref xs);
+        let mut x = (6,9,8,1,2,7);
+        fmuttuple6(ref x);
+        fmuttuple6(ref x);
+        let mut x : uint $pre @prover = 3;
+        fmutbigint(ref x);
+        fmutbigint(ref x);
+        let mut s : string $pre @prover = "Test";
+        fmutstring(ref s);
+        fmutstring(ref s);
+        let mut xss = [[1, 2, 3], [4], [5, 6]];
+        fmutlistlist(ref xss);
+        fmutlistlist(ref xss);
+        let mut xs = [(1, 2), (3, 4), (5, 6)];
+        fmutlisttuple(ref xs);
+        fmutlisttuple(ref xs);
+        let mut x = 3;
+        fmutu64(ref x);
+        fmutu64(ref x);
+    }
+
+    // The parametrically polymorphic function reverse_list can be called in public context
+    // because all non-public values that it uses, are in $post stage and thus always of type Value in Rust
+    // (the length of xs is public).
+    let xs : list[uint[31] $post @prover] = [wire{1}, wire{2}, wire{3}];
+    let xs1 = reverse_list(xs); // from example_ffi.rs
+    let xs2 = reverse(xs); // from Std.zksc
+    dbg_assert(length(xs1) == length(xs2));
+    for i in 0 .. length(xs) {
+        assert_zero(xs1[i] - xs2[i]);
+    }
+    {}
+}

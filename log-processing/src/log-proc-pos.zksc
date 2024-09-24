@@ -1,0 +1,52 @@
+/* Log processing use case: Positive variant (proving that all given canaries occurs in the text)
+
+Features: No ZK techniques needed.
+
+*/
+use Std::*;
+
+// Must be a prime greater than 65536 times the total length of all iocs (in bytes)
+type N : Nat = 2305843009213693951;
+
+fn scalar_prod_vec[N : Nat, $S, @D]
+( xs : arr[uint[N] $S @D]
+, ys : arr[uint[N] $S @D]
+) -> uint[N] $S @D
+where Vectorization
+{ sum(xs *. ys)
+}
+
+fn verify_single
+( text : arr[uint[N] $post @prover]
+, canary : arr[uint[N] $post @prover]
+)
+where Field[N], Vectorization
+{ let n = length(text)
+; let m = length(canary)
+; let sqsums = for i in 0 .. n - m + 1 
+  { let vec = text[i .. i + m] -. canary
+  ; scalar_prod_vec(vec, vec)
+  }
+; assert_zero(prod(sqsums))
+}
+
+fn verify
+( text : arr[uint[N] $post @prover]
+, canaries : list[arr[uint[N] $post @prover]]
+)
+where Field[N], Vectorization
+{ for k in 0 .. length(canaries) { verify_single(text, canaries[k]) }
+;
+}
+
+fn main()
+where Field[N], Vectorization
+{ let n = get_public("text_len")
+; let ms : list[u64 $pre @public] = get_public("canary_len_list")
+; let canaries_pre : list[list[uint[N] $pre @verifier] $pre @verifier] $pre @verifier = get_instance("canary_list")
+; let canaries = for i in 0 .. length(ms) { array_to_prover(pre_uint_list_to_post_array(canaries_pre[i as @verifier], ms[i])) }
+; let text_pre = get_witness("text")
+; let text = pre_uint_list_to_post_array(text_pre, n)
+; verify(text, canaries)
+;
+}

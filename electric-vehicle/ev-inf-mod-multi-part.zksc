@@ -1,0 +1,409 @@
+use Std::*;
+use Integer::*;
+use Poseidon::*;
+use Inequalities::*;
+use FixedPoint::*;
+use SqrtUtil::*;
+
+// Assumes that initial coordinates are integers that can be represented 
+// as fixed point numbers with len and pplen given as public constants
+
+//2^73-69 for 35-bit numbers
+//type N : Nat = 0x1FFFFFFFFFFFFFFFFBB;
+
+//M61 for emp backend. len=29 with this modulus.
+type N : Nat = 0x1FFFFFFFFFFFFFFF;
+
+struct Point[N : Nat, @D] {
+  x : Fixed[N, $post, @D],
+  y : Fixed[N, $post, @D],
+}
+
+fn point_to_prover[N : Nat, @D]
+( p : Point[N, @D]
+) -> Point[N, @prover]
+{ Point { x: fixed_prover(p.x), y: fixed_prover(p.y) }
+}
+
+struct Circle[N : Nat] {
+  center : Point[N, @public],
+  r_coef_sqr : Checked[N, $post, @public] //radius fixedpoint repr coef squared
+}
+
+struct EVState[N : Nat, @D] {
+  current_total_distance : Fixed[N, $post, @D],  // Total length of the point trail processed so far
+  current_circles_distance : Fixed[N, $post, @D],  // Total length of the parts of the point trail that fell into the circles
+  last_point : Point[N, @D]  // Last point in the trail that was processed
+}
+
+/*
+/*
+check_fit checks whether the set bits in uint[N] fit inside the given len. 
+This is used to do (relatively) cheap comparison operations rather than
+having to do lexicographic sorting.
+
+Fixed-point number coefs are n bits while the modulus is at least 2n+1 bits.
+This means that comparing two coefs can be done by subtraction.
+a < b can be replaced with b-a, and checking whether the result is in len bits
+
+if b < a, then the result is negative and it underflows into a large group object
+but given the sizes, it can't loop back around into being a len bit large element again
+*/
+fn check_fit[N : Nat, $S, @D](coef : uint[N] $S @D, len : uint $pre @public) 
+  where Field[N] {
+  if (post $S) {
+    if (@prover <= @D) {
+      let trash = bitextract(coef, len);
+    } else { dbg_assert(coef as $pre < pow_pre(2, len)); }
+  } else { dbg_assert(coef < pow_pre(2, len)); }
+}
+*/
+/*
+//this version is used *ONLY* for radius checks (no square root)
+//requires N prime, N must have at least 2*len+2 bits.
+//finds the distance between two points a,b. 
+//the distance is returned in the form of the coefficient of the appropriate Fixed number
+//it is not as a Fixed number for performance (can compare coefs)
+fn dist_nosqrt_coef(a : Coord[N], b : Coord[N], p2k : uint[N] $post @public) -> uint[N] $post @prover
+  where Field[N] {
+    let a0 = a.0.coef;
+    let a1 = a.1.coef;
+    let b0 = b.0.coef;
+    let b1 = b.1.coef;
+
+    let mid = sqr(a0 - b0) + sqr(a1 - b1);
+    let res = wire{mid as $pre / (p2k as $pre as @prover)};
+    let left = res*p2k as @prover;
+    let right = left + p2k as @prover;
+
+    trace "Radius distance^2 coefficient correctness checks" {
+      //Removing this check means that the return value c can be larger than the true distance value x
+      //This is OK because this function is only used for radius checks, so c < r^2
+      //Returning a larger c gives no advantage to that check.
+      //check_fit(mid - left, a.0.len);
+      check_fit(right - mid, a.0.len);
+      univ_assert(!is_zero(right-mid));
+    }
+    res
+}
+*/
+fn dist_sqr_helper[N : Nat, @D](a : Point[N, @D], b : Point[N, @D]) -> uint[N] $post @D {
+
+  sqr(a.x.coef - b.x.coef) + sqr(a.y.coef - b.y.coef)
+
+}
+
+//this version is used for distance calculating (includes square root)
+fn dist_inf(a : Point[N, @prover], b : Point[N, @prover], p2k : uint[N] $post @public, ref sizeasserters : list[SizeAsserter[N, $post, @prover]]) -> Fixed[N, $post, @prover] where Field[N] {
+
+  let len = a.x.len;
+  let pplen = a.x.pplen;
+
+  let mid = dist_sqr_helper(a, b);
+  let dist_sqr_coef : uint $pre @prover = (mid as $pre / p2k as $pre as @prover) as uint;
+  let dist_coef = wire{sqrt_coef(dist_sqr_coef,pplen) as uint[N]};
+
+  trace "Checking line segment distance coefficient correctness" {
+    let checked_mid = check_size(mid - dist_coef * dist_coef, ref sizeasserters[len]);
+    assert_le'(checked_mid, Checked { val: dist_coef + dist_coef }, ref sizeasserters[len]);
+  }
+
+  trace "Checking if distance fits into fixed" {
+    fixed3(dist_coef,len,pplen,ref sizeasserters)
+  }
+}
+
+// Read and pad the coordinates of the car from witness.json
+fn pad_car_coords(len : uint $pre @public, pplen : uint $pre @public, r : uint $pre @public, ref sizeasserters : list[SizeAsserter[N, $post, @prover]]) -> tuple[list[Point[N, @prover]], list[uint[N] $post @prover]]
+  where Field[N] {
+  let coords : list[list[uint[N] $pre @prover] $pre @prover] $pre @prover = get_witness("coordinates");
+  let max_coords = get_public("max_coordinates");
+
+  let len_coords = length(coords);
+  // let len_hashable_coords = 2 * max_coords;
+  let len_hashable_coords = ((max_coords * 2 + 1) / r + 1) * r;  // Round the length of hashable coords up to the nearest multiple of 
+  let mut hashable_coords : list[uint[N] $post @prover] = [0; len_hashable_coords];
+  let mut padded_coords : list[Point[N, @prover]] = [Point { x : uint_to_fixed3(0, len, pplen, ref sizeasserters), y : uint_to_fixed3(0, len, pplen, ref sizeasserters) }; max_coords];
+  for i in 0..max_coords {
+    let row = (if i as @prover < len_coords {i as @prover} else {len_coords-1}) as @prover;
+    let x : uint[N] $post @prover = wire{coords[row][0]};
+    let y : uint[N] $post @prover = wire{coords[row][1]};
+    padded_coords[i] = Point { x : uint_to_fixed3(x, len, pplen, ref sizeasserters), y : uint_to_fixed3(y, len, pplen, ref sizeasserters) };
+    hashable_coords[2 * i] = x;
+    hashable_coords[2 * i + 1] = y;
+  };
+
+  // Add the 10* required by Poseidon to the end of hashable coordinates
+  hashable_coords[2 * max_coords] = wire{1 : uint[N] $pre @prover};
+  for i in (2 * max_coords + 1)..len_hashable_coords {
+      hashable_coords[i] = wire{0 : uint[N] $pre @prover};
+  };
+
+  (padded_coords, hashable_coords)
+}
+
+fn read_previous_state(len : uint $pre @public, pplen : uint $pre @public, ref sizeasserters : list[SizeAsserter[N, $post, @prover]], first_coordinate_point : Point[N, @prover], first_iteration : bool[N] $pre @public) -> EVState[N, @prover]
+  where Field[N] {
+  let current_total_distance : Fixed[N, $post, @prover] = fixed3(wire{get_witness("current_total_distance_coef")}, len, pplen, ref sizeasserters);
+  let current_circles_distance : Fixed[N, $post, @prover] = fixed3(wire{get_witness("current_circles_distance_coef")}, len, pplen, ref sizeasserters);
+  let last_point_pre : tuple[uint[N] $pre @prover, uint[N] $pre @prover] = get_witness("last_point");
+  EVState {
+    current_total_distance : current_total_distance,
+    current_circles_distance : current_circles_distance,
+    last_point : 
+    if (first_iteration) {
+      first_coordinate_point
+    } else {
+      Point {
+        x : uint_to_fixed3(wire{last_point_pre.0}, len, pplen, ref sizeasserters),
+        y : uint_to_fixed3(wire{last_point_pre.1}, len, pplen, ref sizeasserters)
+      }
+    }
+  }
+}
+
+fn circle_contains(point : Point[N, @prover], circle : Circle[N], ref sizeasserters : list[SizeAsserter[N, $post, @prover]]) -> bool[N] $post @prover
+  where Field[N] {
+    let coef = dist_sqr_helper(point,point_to_prover(circle.center));
+    let bw : uint $pre @public = circle.center.x.len*2+2;
+    lt3'(check_size(coef, ref sizeasserters[bw]), checked_prover(circle.r_coef_sqr), ref sizeasserters[bw])
+}
+
+fn circles_contain(c : Point[N, @prover], rs : list[Circle[N]], ref sizeasserters : list[SizeAsserter[N, $post, @prover]]) -> bool[N] $post @prover
+  where Field[N] {
+    let bs = for i in 0 .. length(rs) { circle_contains(c,rs[i],ref sizeasserters) };
+    any(bs)
+}
+
+fn sum_distance(points: list[Point[N, @prover]], circles : list[Circle[N]], max_coords : uint, real_coord_amt : uint $pre @prover, ref sizeasserters : list[SizeAsserter[N, $post, @prover]]) -> tuple[Fixed[N, $post, @prover],Fixed[N, $post, @prover]] where Field[N] {
+    let s_i : uint[N] $post @public = 0;
+
+    let len = points[0].x.len;
+    let pplen = points[0].x.pplen;
+    let p2k : uint[N] $post @public = wire {pow_pre(2,pplen)};
+
+    let mut s_circles = uint_to_fixed3(s_i as @prover,len,pplen,ref sizeasserters);
+    let mut s_total = s_circles;
+
+    let mut current_in_circles : bool[N] $post @prover = circles_contain(points[0],circles,ref sizeasserters);
+
+    for i in 0..length(points)-1 {
+        let next_in_circles = circles_contain(points[i+1],circles,ref sizeasserters);
+        let line_in_circles = current_in_circles & next_in_circles;
+        let d = dist_inf(points[i],points[i+1],p2k,ref sizeasserters);
+
+        s_circles = fixed_cond(line_in_circles,add_fixed3(s_circles,d,ref sizeasserters),s_circles);
+        current_in_circles = next_in_circles;
+
+        s_total = add_fixed3(s_total,d,ref sizeasserters)
+    }
+
+    (s_total,s_circles)
+}
+
+fn read_circles[N : Nat](len : uint $pre @public, pplen : uint $pre @public, bw : uint $pre @public) -> list[Circle[N]] 
+  where Field[N] {
+
+    let circles_pre : list[list[uint[N]]] = get_public("circles");
+    let p2k : uint[N] $pre @public = pow_pre(2,pplen);
+    let mut sizeasserter = sizeasserter_new(2*len+2);
+    for i in 0..length(circles_pre) {
+
+        let r_coef_sqr = wire{sqr(circles_pre[i][2]*p2k)};
+        let r_coef_sqr_checked = check_size(r_coef_sqr,ref sizeasserter);
+        Circle {
+          center: Point { 
+                    x: fixed_downcast(uint_to_fixed(circles_pre[i][0],len,pplen)), 
+                    y: fixed_downcast(uint_to_fixed(circles_pre[i][1],len,pplen))
+                  },
+          r_coef_sqr: r_coef_sqr_checked
+        }
+
+    }
+}
+
+fn read_poseidon_params[N : Nat]() -> PoseidonParams[N, $post, @public] 
+  where Field[N] {
+  // Poseidon parameters
+  let t : uint[N] $post @public = wire{get_public("t")};
+  let r : uint[N] $post @public = wire{get_public("r")};
+  let o : uint[N] $post @public = wire{get_public("o")};
+  let alpha : uint[N] $post @public = wire{get_public("alpha")};
+  let R_F : uint[N] $post @public = wire{get_public("R_F")};
+  let R_P : uint[N] $post @public = wire{get_public("R_P")};
+  let round_constants_pre : list[uint[N] $pre @public] = get_public("round_constants");
+  let mds_matrix_pre : list[list[uint[N] $pre @public]] = get_public("mds_matrix");
+
+  let round_constants : list[uint[N] $post @public] = 
+  for i in 0..length(round_constants_pre) {
+    wire{round_constants_pre[i]}
+  };
+  let mds_matrix : list[list[uint[N] $post @public]] =
+  for i in 0..length(mds_matrix_pre) {
+    let row : list[uint[N] $post @public] = 
+    for j in 0..length(mds_matrix_pre[i]) {
+      wire{mds_matrix_pre[i][j]}
+    };
+    row
+  };
+
+  let hash_params : PoseidonParams[N, $post, @public] = PoseidonParams {
+    t : t,
+    r : r,
+    o : o,
+    alpha : alpha,
+    R_F : R_F,
+    R_P : R_P,
+    round_constants : round_constants,
+    mds_matrix : mds_matrix,
+    rate_first : true
+  };
+
+  hash_params
+}
+
+fn read_hashes(o : uint $pre @public) -> tuple[list[uint[N] $post @verifier], list[uint[N] $post @verifier], list[uint[N] $post @verifier]] 
+  where Field[N]{
+  let previous_state_hash_pre : list[uint[N] $pre @verifier] $pre @verifier = get_instance("previous_state_hash");
+  let previous_state_hash : list[uint[N] $post @verifier] =
+  for i in 0..o as $pre as uint {
+    wire{previous_state_hash_pre[i as @verifier]}
+  };
+  let coordinates_hash_pre : list[uint[N] $pre @verifier] $pre @verifier = get_instance("coordinates_hash");
+  let coordinates_hash : list[uint[N] $post @verifier] =
+  for i in 0..o as $pre as uint {
+    wire{coordinates_hash_pre[i as @verifier]}
+  };
+  let new_state_hash_pre : list[uint[N] $pre @verifier] $pre @verifier = get_instance("new_state_hash");
+  let new_state_hash : list[uint[N] $post @verifier] =
+  for i in 0..o as $pre as uint {
+    wire{new_state_hash_pre[i as @verifier]}
+  };
+  (previous_state_hash, coordinates_hash, new_state_hash)
+}
+
+fn assert_ge_fixed(x : Fixed[N, $post, @prover], y : Fixed[N, $post, @prover], ref sizeasserters : list[SizeAsserter[N, $post, @prover]]) 
+where Field[N] {
+  let overcover = sub_fixed3(x, y, ref sizeasserters);
+  let trash = fixed_nonnegative3(overcover.coef, overcover.len, overcover.pplen, ref sizeasserters);
+}
+
+fn hash_and_verify(hash_params : PoseidonParams[N, $post, @public], data : list[uint[N] $post @prover], true_hash : list[uint[N] $post @verifier]) 
+  where Field[N] {
+  let hash = poseidon(data, hash_params.t, hash_params.r, hash_params.o, hash_params.alpha, hash_params.R_F, hash_params.R_P, hash_params.round_constants, hash_params.mds_matrix, hash_params.rate_first);
+
+  dbg_print("Hash:" : string);
+
+  for i in 0..hash_params.o as $pre as uint {
+    dbg_print(to_string(hash[i] as $pre));
+  };
+
+  for i in 0..hash_params.o as $pre as uint {
+    assert_zero(true_hash[i] as @prover - hash[i]);
+  };
+}
+
+fn verify_EVState(hash_params : PoseidonParams[N, $post, @public], state : EVState[N, @prover], true_hash : list[uint[N] $post @verifier]) 
+  where Field[N] {
+  let pure_data : list[uint[N] $post @prover] = [state.current_total_distance.coef, state.current_circles_distance.coef, state.last_point.x.coef, state.last_point.y.coef, wire{1 : uint[N] $pre @prover}];
+  let padding : list[uint[N] $post @prover] = [wire{0 : uint[N] $pre @prover}; hash_params.r as $pre as uint - (length(pure_data) % hash_params.r as $pre as uint)];  // Add zeroes for padding until the data length is a multiple of r, if necessary
+  let data : list[uint[N] $post @prover] = append(pure_data, padding);
+  hash_and_verify(hash_params, data, true_hash);
+}
+
+fn EV_continue(previous_state : EVState[N, @prover], points : list[Point[N, @prover]], circles : list[Circle[N]], ref sizeasserters : list[SizeAsserter[N, $post, @prover]]) -> EVState[N, @prover] 
+  where Field[N] {
+
+  let all_points : list[Point[N, @prover]] = append([previous_state.last_point], points);
+  let distances = sum_distance(all_points, circles, 0 : uint $pre @public, 0 : uint $pre @prover, ref sizeasserters);
+  let new_total_distance = distances.0;
+  let new_circles_distance = distances.1;
+
+  let new_state = EVState {
+    current_total_distance : add_fixed3(previous_state.current_total_distance, new_total_distance, ref sizeasserters),
+    current_circles_distance : add_fixed3(previous_state.current_circles_distance, new_circles_distance, ref sizeasserters),
+    last_point : points[length(points) - 1]
+  };
+
+  dbg_print("Newdistances:" : string);
+  dbg_print(to_string(new_state.current_total_distance.coef as $pre));
+  dbg_print(to_string(new_state.current_circles_distance.coef as $pre));
+
+  new_state
+}
+
+fn EV_finish(final_state : EVState[N, @prover], required_total_distance : Fixed[N, $post, @verifier], required_circles_percentage : uint[N] $post @verifier, ref sizeasserters : list[SizeAsserter[N, $post, @prover]]) 
+  where Field[N]{
+  let len = final_state.current_total_distance.len;
+  let pplen = final_state.current_total_distance.pplen;
+  let mut verifier_sizeasserters : list[SizeAsserter[N, $post, @verifier]] = sizeasserters_new(log2(N) - 1);
+
+  // Check if the total distance is more than required
+  trace "Comparing total distance travelled to required length" {
+    dbg_print(fixed_to_string(final_state.current_total_distance));
+    assert_ge_fixed(final_state.current_total_distance, fixed_prover(required_total_distance), ref sizeasserters);
+  }
+
+  // Check if the required percentage of the distance was in circles
+  let hundred : Fixed[N, $post, @verifier] = fixed_downcast(uint_to_fixed(100, len, pplen));
+  let percent : Fixed[N, $post, @verifier] = uint_to_fixed3(required_circles_percentage, len, pplen, ref verifier_sizeasserters);
+  let point : Fixed[N, $post, @verifier] = div_fixed3(percent, hundred, ref verifier_sizeasserters);
+  let required_circles_distance : Fixed[N, $post, @prover] = mult_fixed3(fixed_prover(point), final_state.current_total_distance, ref sizeasserters);
+
+  trace "Checking if 80% of distance is in circles" {
+    dbg_print(fixed_to_string(final_state.current_circles_distance));
+    assert_ge_fixed(final_state.current_circles_distance, required_circles_distance, ref sizeasserters);
+  }
+}
+
+fn main() 
+  where Field[N] {
+  // Getting inputs
+  // FixedPoint parameters from public
+  let bw : uint $pre @public = log2(N) - 1;
+  let mut sizeasserters : list[SizeAsserter[N, $post, @prover]] = sizeasserters_new(bw);
+  let len : uint $pre @public = get_public("len");
+  let pplen : uint $pre @public = get_public("pplen");
+
+  // Iteration data from public
+  let first_iteration : bool[N] $pre @public = get_public("first_iteration");
+  let last_iteration : bool[N] $pre @public = get_public("last_iteration");
+
+  // Poseidon parameters from public
+  let hash_params : PoseidonParams[N, $post, @public] = read_poseidon_params();
+
+  // Circles from public
+  let circles : list[Circle[N]] = read_circles(len, pplen, bw);
+
+  // Read coordinates to be processed from witness
+  let coords = pad_car_coords(len, pplen, hash_params.r as $pre as uint, ref sizeasserters);
+  let car_coords = coords.0;
+  let hashable_car_coords = coords.1;
+
+  // Read previous EVState from witness
+  let previous_state = read_previous_state(len, pplen, ref sizeasserters, car_coords[0], first_iteration);
+
+  // Read hashes from instance
+  let hashes = read_hashes(hash_params.o as $pre as uint);
+  let previous_state_hash = hashes.0;
+  let coordinates_hash = hashes.1;
+  let new_state_hash = hashes.2;
+
+  // Read subsidy requirements from instance
+  let required_total_distance : Fixed[N, $post, @verifier] = fixed_downcast(uint_to_fixed(get_instance("required_total_distance"), len, pplen));
+  let required_circles_percentage : uint[N] $post @verifier = uint_downcast(get_instance("required_circles_percentage"));
+  
+  // Application logic
+  // Verify that we start from the state we finished in last time
+  verify_EVState(hash_params, previous_state, previous_state_hash);
+  // Verify that we have the right coordinates
+  hash_and_verify(hash_params, hashable_car_coords, coordinates_hash);
+  // Process the new coordinates
+  let new_state = EV_continue(previous_state, car_coords, circles, ref sizeasserters);
+  // Verify the new state
+  verify_EVState(hash_params, new_state, new_state_hash);
+  // Depending on whether this is the last part of the proof or not, check adherence to the subsidy rules
+  if (last_iteration) {
+    EV_finish(new_state, required_total_distance, required_circles_percentage, ref sizeasserters);
+  }
+}

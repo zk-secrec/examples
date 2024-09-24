@@ -1,0 +1,34 @@
+<div class="container pb-4 text-center">
+  <div class="d-grid gap-2 col-6 mx-auto">
+        <button
+        type="button"
+        class="btn"
+        [ngClass]="'btn-primary'"
+        (click)="loadFirstPath()">
+        Load First Path
+      </button>
+      <button
+      type="button"
+      class="btn"
+      [ngClass]="'btn-primary'"
+      (click)="loadSecondPath()">
+      Load Second path
+    </button>
+    <button
+      type="button"
+      class="btn btn-danger"
+      [ngClass]="'btn-' + ((proofStatusString$ | async) || 'primary')"
+      (click)="proveClicked()">
+      {{ (proofDone$ | async) ? "Redo" : "Prove" }}
+    </button>
+    <p>
+    <ngb-progressbar
+      [showValue]="true"
+      [type]="(proofStatusString$ | async) || 'primary'"
+      [value]="(progressValue$ | async) || 0"
+      [striped]="!(proofDone$ | async)"
+      [animated]="!(proofDone$ | async)">
+    </ngb-progressbar>
+    </p>
+  </div>
+</div>

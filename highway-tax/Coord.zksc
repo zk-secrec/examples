@@ -1,0 +1,66 @@
+use Std::*;
+use Integer::*;
+use FixedPoint::*;
+use Inequalities::*;
+
+pub type Coord[N : Nat, $S, @D] : Qualified = tuple[Fixed[N, $S, @D] $pre @public, Fixed[N, $S, @D] $pre @public] $pre @public;
+
+// Cast a Coord to $pre stage
+pub fn coord_pre[N : Nat, $S, @D](point : Coord[N, $S, @D]) -> Coord[N, $pre, @D] {
+    (fixed_pre(point.0), fixed_pre(point.1))
+}
+
+// Cast a Coord to @prover domain
+pub fn coord_prover[N : Nat, $S, @D](point : Coord[N, $S, @D]) -> Coord[N, $S, @prover] 
+    where Field[N] {
+    (fixed_prover(point.0), fixed_prover(point.1))
+}
+
+// Find the additive inverse of a vector
+pub fn vector_inv[N : Nat, $S, @D](vec : Coord[N, $S, @D]) -> Coord[N, $S, @D]
+    where Field[N] {
+    (negate_fixed(vec.0), negate_fixed(vec.1))
+}
+
+// Find the sum of two vectors
+pub fn vector_sum[N : Nat, $S, @D](vec1 : Coord[N, $S, @D], vec2 : Coord[N, $S, @D], ref sizeasserters : list[SizeAsserter[N, $S, @D]]) -> Coord[N, $S, @D]
+    where Field[N] {
+    (add_fixed3(vec1.0, vec2.0, ref sizeasserters), add_fixed3(vec1.1, vec2.1, ref sizeasserters))
+}
+
+// Find the difference of two vectors
+pub fn vector_diff[N : Nat, $S, @D](vec1 : Coord[N, $S, @D], vec2 : Coord[N, $S, @D], ref sizeasserters : list[SizeAsserter[N, $S, @D]]) -> Coord[N, $S, @D]
+    where Field[N] {
+    vector_sum(vec1, vector_inv(vec2), ref sizeasserters)
+}
+
+// Find the sum of two vectors with positive coordinates
+pub fn vector_sum_pos[N : Nat, $S, @D](vec1 : Coord[N, $S, @D], vec2 : Coord[N, $S, @D], ref sizeasserters : list[SizeAsserter[N, $S, @D]]) -> Coord[N, $S, @D]
+    where Field[N] {
+    (fixed3(vec1.0.coef + vec2.0.coef, vec1.0.len, vec1.0.pplen, ref sizeasserters), fixed3(vec1.1.coef + vec2.1.coef, vec1.1.len, vec1.1.pplen, ref sizeasserters))
+}
+
+// Find the difference of two vectors with positive coordinates where vec1.i > vec.2.i for all i
+pub fn vector_diff_pos[N : Nat, $S, @D](vec1 : Coord[N, $S, @D], vec2 : Coord[N, $S, @D], ref sizeasserters : list[SizeAsserter[N, $S, @D]]) -> Coord[N, $S, @D]
+    where Field[N] {
+    dbg_assert(vec1.0.coef as $pre > vec2.0.coef as $pre);
+    dbg_assert(vec1.1.coef as $pre > vec2.1.coef as $pre);
+    (fixed3(vec1.0.coef - vec2.0.coef, vec1.0.len, vec1.0.pplen, ref sizeasserters), fixed3(vec1.1.coef - vec2.1.coef, vec1.1.len, vec1.1.pplen, ref sizeasserters))
+}
+
+// Find the squared length of a vector
+// Returns the coefficient of the FixedPoint representing the length of the vector
+pub fn vector_len_sqrd[N : Nat, @D](vec : Coord[N, $pre, @D]) -> uint[N] $pre @D
+    where Field[N] {
+    let pplen = vec.0.pplen;
+    (vec.0.coef * vec.0.coef + vec.1.coef * vec.1.coef) / pow_pre(2 : uint[N] $pre @D, pplen)
+}
+
+// Scale a vector by an unsigned integer
+pub fn vector_scale_uint[N : Nat, $S, @D](vec : Coord[N, $S, @D], scal : uint[N] $S @D, ref sizeasserters : list[SizeAsserter[N, $S, @D]]) -> Coord[N, $S, @D]
+    where Field[N] {
+    let new_x = fixed3(vec.0.coef * scal, vec.0.len, vec.0.pplen, ref sizeasserters);
+    let new_y = fixed3(vec.1.coef * scal, vec.1.len, vec.1.pplen, ref sizeasserters);
+
+    (new_x, new_y)
+}

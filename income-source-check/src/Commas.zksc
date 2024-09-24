@@ -1,0 +1,56 @@
+use Std::*;
+use Integer::*;
+use Store::*;
+
+// Local computation
+// Input: Non-decreasing list of natural numbers; Number of distinct values
+// Output: Positions of the first occurrences of every value, and the length of the input list
+fn invert_list[@D](l : list[u64 $pre @D], pos_length : u64 $pre @public) -> list[u64 $pre @D] {
+  let l_local = l as @D;
+  let n = length(l_local);
+  let mut res = for i in 0 .. pos_length as @D { 0 };
+  let mut cnt = 0;
+  for k in 0 .. n {
+    if (l_local[k] - cnt > 0) { res[cnt] = k; }
+    cnt = l_local[k];
+  }
+  res[length(res) - 1] = n;
+  for i in 0 .. pos_length { res[i as @D] }
+}
+
+// Circuit computation
+// Input: Non-decreasing list of natural numbers; One more list of integers
+// Checks if the second list is the result of inversion (in the sense of the previous function) of the first list
+fn check_invert_list[N : Nat](l : list[uint[N] $post @prover], res : list[uint[N] $post @prover]) 
+  where Field[N] {
+  let mut sto = store_new(true, true, false);
+  sto{#(0 : uint[N] $post @prover)} = 0;
+  for i in 0 .. length(l) { sto{#(i as uint[N] as $post as @prover + 1)} = l[i]; }
+  for i in 0 .. length(res) {
+    if (i < length(res) - 1) {
+      let i_post = i as uint[N] as $post as @prover;
+      assert_zero(sto{#(res[i] + 1)} - (i_post + 1));
+      assert_zero(sto{#(res[i])} - i_post);
+    } else {
+      assert_zero(res[i] - (wire { length(l) as uint[N] }) as @prover)
+    }
+  };
+}
+
+pub fn find_comma_pos[N : Nat](origrow : list[uint[N] $post @prover], pos_length : u64 $pre @public) -> list[uint[N] $post @prover] 
+  where Field[N] {
+  let n = length(origrow);
+  let mut infield = false;
+  let mut cnt = 0;
+  let longlist = for i in 0 .. n {
+    let is_dquo = eq(origrow[i],34);
+    let is_comma = eq(origrow[i],44);
+    infield = xor(is_dquo, infield); 
+    cnt = cnt + (is_comma & !infield) as uint[N];
+    cnt
+  };
+  let res_pre = invert_list(for i in 0 .. length(longlist) { longlist[i] as $pre as u64 }, pos_length);
+  let res = for i in 0 .. length(res_pre) { wire { res_pre[i] as uint[N] } };
+  check_invert_list(longlist, res);
+  res
+}

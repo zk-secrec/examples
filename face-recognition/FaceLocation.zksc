@@ -1,0 +1,36 @@
+// ./runrust docs/resnet/FaceLocation.zksc docs/resnet/FaceLocation_public.json docs/resnet/FaceLocation_instance.json docs/resnet/FaceLocation_witness.json -o out
+
+use FaceLocator::*;
+use Vec::*;
+use FastFixedPoint::*; // signed_uintN_to_uint
+use Std::*;
+
+type N : Nat = 170141183460469231731687303715884105727; // 2^127-1
+
+type Int : Qualified = uint[N] $post @prover; // signed or unsigned integer
+
+fn main() where Field[N], Vectorization {
+    dbg_print("start" : string $pre @public);
+    let num_rows : u64 $pre @public = get_public("num_rows"); // Size of the input image
+    let num_cols : u64 $pre @public = get_public("num_cols"); // Size of the input image
+    let image_pre : list[list[uint[N] $pre @prover] $pre @prover] $pre @prover = get_witness("image");
+
+    let num_pixels = num_rows * num_cols;
+    let image_pre_flattened : list[uint[N] $pre @prover] =
+        for i in 0 .. num_pixels {
+            image_pre[(i / num_cols) as @prover][(i % num_cols) as @prover]
+        };
+    let image_flattened : arr[Int] = array_to_post(freeze(image_pre_flattened));
+    let trash = bitextract_uv(image_flattened, 8); // check that each pixel is in the range 0..255
+
+    let image : list[list[Int]] = unflatten_img(num_rows, num_cols, image_flattened);
+    let face_locator = init_face_locator();
+    let location_result = apply_face_locator(face_locator, image);
+    dbg_print("original image coordinates of the best face location:" : string $pre @public);
+    dbg_print("top row = " ++ to_string(signed_uintN_to_uint(location_result.top_row as $pre)));
+    dbg_print("left col = " ++ to_string(signed_uintN_to_uint(location_result.left_col as $pre)));
+    dbg_print("bottom row = " ++ to_string(location_result.bottom_row as $pre));
+    dbg_print("right col = " ++ to_string(location_result.right_col as $pre));
+
+    dbg_print("finish" : string $pre @public);
+}

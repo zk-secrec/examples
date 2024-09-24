@@ -1,0 +1,23 @@
+<div class="py-4 px-3 text-bg-dark">
+  <div class="col-lg-6 mx-auto">
+    <div class="container">
+      <div class="row border-bottom border-top border-opacity-0">
+        <div class="col">
+          Distance travelled
+        </div>
+        <div class="col" *ngIf="{ val: distance$ | async } as distance">
+          {{ distance.val! / 1609.34 | number: '1.0-2' }} miles
+        </div>
+      </div>
+      <div class="row border-bottom border-opacity-10">
+        <div class="col">
+          Percentage within bounds
+        </div>
+        <div class="col" *ngIf="{ val: inBounds$ | async } as inBounds">
+          {{ inBounds.val | number: '1.0-2' }} %
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+

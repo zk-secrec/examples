@@ -1,0 +1,46 @@
+// ./runrust docs/resnet/FaceAlignment.zksc docs/resnet/FaceAlignment_public.json docs/resnet/FaceAlignment_instance.json docs/resnet/FaceAlignment_witness.json -o out
+
+use FaceAligner::*;
+use FastFixedPoint::*;
+use Bitextract::*;
+use Integer::*;
+use Std::*;
+
+type N : Nat = 170141183460469231731687303715884105727; // 2^127-1
+
+type Int : Qualified = uint[N] $post @prover; // signed or unsigned integer
+
+fn main() where Field[N], Vectorization {
+    dbg_print("start" : string $pre @public);
+
+    let num_rows : u64 $pre @public = get_public("num_rows"); // Size of the input image
+    let num_cols : u64 $pre @public = get_public("num_cols"); // Size of the input image
+    let image_pre : list[list[uint[N] $pre @prover] $pre @prover] $pre @prover = get_witness("image");
+    let rect_left : Int = wire { get_witness("rect_left") };  // rect: the position in the input image where the face is located
+    let rect_right : Int = wire { get_witness("rect_right") };
+    let rect_top : Int = wire { get_witness("rect_top") };
+    let rect_bottom : Int = wire { get_witness("rect_bottom") };
+
+    let image : list[list[Int]] =
+        for i in 0 .. num_rows {
+            for j in 0 .. num_cols {
+                let x = wire { image_pre[i as @prover][j as @prover] };
+                let trash = bitextract(x, 8); // check that x is in the range 0..255
+                x
+            }
+        };
+
+    let fa : FaceAligner = init_face_aligner();
+    let xv = apply_face_aligner(fa, image, rect_left, rect_right, rect_top, rect_bottom);
+
+    for r in 0 .. 150 : u64 $pre @public {
+        let mut s : string $pre @prover = "";
+        for c in 0 .. 150 : u64 $pre @public {
+            let x = xv[r * 150 + c];
+            s = string_append(s, to_string(x as $pre as uint / 26));
+        }
+        dbg_print(s);
+    }
+
+    {}
+}

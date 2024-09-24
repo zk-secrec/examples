@@ -1,0 +1,56 @@
+use Std::*;
+use Bitextract::*;
+
+pub fn sha256[N : Nat](msg : list[bool[N] $post @prover]) -> list[bool[N] $post @prover] 
+where Field[N] {
+    let n = length(msg);
+    let padding = for i in 0 .. 512 - (n + 65) % 512 { false };
+    let one = [true];
+    let lengthbits_fst = bitextract_pre(n as uint[N], 64);
+    let lengthbits_snd = for i in 0 .. 64 {
+        (wire { lengthbits_fst[i] as bool[N] }) as @prover
+    };
+    let lengthbits = reverse(lengthbits_snd);
+    let msg2 = append(append(append(msg, one), padding), lengthbits);
+    // length of msg2 is now a multiple of 512
+    // split it into blocks of 512 bits each
+    let numBlocks = length(msg2) / 512;
+    let blocks =
+        for i in 0 .. numBlocks {
+            for j in 0 .. 512 {
+                msg2[512 * i + j]
+            }
+        };
+    // The initial hash values for SHA-256:
+    let init_as_num : uint $pre @public = 0x6a09e667bb67ae853c6ef372a54ff53a510e527f9b05688c1f83d9ab5be0cd19;
+    let initsb_as_prebool = bitextract_pre(init_as_num, 256);
+    let initsb : list[bool[N] $post @prover] = for i in 0 .. 256 {
+        (wire { initsb_as_prebool[i] as bool[N]  }) as @prover
+    };
+    // Process the blocks
+    let rec h =
+        for i in 0 .. numBlocks+1 {
+            if (i == 0) {
+                initsb
+            } else {
+                // the blocks are little-endian order, so process them in reverse order
+                call("sha256", [reverse(blocks[i - 1]), h[i-1]])[0]
+            }
+        };
+    // Something breaks here sometimes regarding indices
+    reverse(h[numBlocks])
+}
+
+pub fn check_hash[N : Nat,@D](str : list[uint[N] $post @prover], hsh : list[uint[N] $post @D]) 
+where Field[N]
+{ let n = length(str)
+; let m = length(hsh)
+; let bitss = bitextract_list(str, 8)
+; let rev_bitss = for i in 0 .. n { reverse(bitss[i]) }
+; let inter = sha256(concat(rev_bitss))
+; let grouped_inter = group(inter, 8)
+; let computed_hash = for i in 0 .. m { bits_to_uint(reverse(grouped_inter[i])) }
+; for i in 0 .. m { assert_zero(computed_hash[i] - hsh[i] as @prover) }
+;
+}
+

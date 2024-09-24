@@ -1,0 +1,46 @@
+use Std::*;
+use Integer::*;
+use Bitextract::*;
+use FixedPoint::*;
+
+sieve fn threebitselect[N : Nat, @D](x : uint[N] $post @D, y : uint[N] $post @D, z : uint[N] $post @D) -> uint[N] $post @D {
+  let p = y * z;
+  let s = y + z - p;
+  s + (p - s) * x
+}
+
+pub sieve fn less_than[N : Nat, @D](x : uint[N] $post @D, y : uint[N] $post @D, bw : u64 $pre @public) -> bool[N] $post @D
+  where Field[N] {
+  let xb : list[bool[N] $post @D] = bitextract(x, bw);
+  let yb : list[bool[N] $post @D] = bitextract(y, bw);
+
+  let mut res : uint[N] $post @D =  (1 - (xb[0] as uint[N])) * (yb[0] as uint[N]);
+  for i in 1 .. bw {
+    res = threebitselect(xb[i] as uint[N], yb[i] as uint[N], res);
+  }
+  uint_to_bool(res)
+}
+
+pub sieve fn uint_cond_sieve[M : Nat, N : Nat, @D](b : bool[M] $post @D, x : uint[N] $post @D, y : uint[N] $post @D) -> uint[N] $post @D
+  where Field[N], Convertible[M, N] {
+  if (@prover <= @D) {
+    b as uint[M] as uint[N] * x + !b as uint[M] as uint[N] * y
+  } else {
+    wire { if (b as bool[N] as $pre) { x as $pre } else { y as $pre } }
+  }
+}
+
+pub fn check_fit_post_prover[N : Nat](coef : uint[N] $post @prover, len : u64 $pre @public) 
+  where Field[N] {
+  let trash = bitextract(coef, len);
+}
+
+pub fn fixed_post_prover[N : Nat](coef : uint[N] $post @prover, len : u64 $pre @public, pplen : u64 $pre @public) -> Fixed[N, $post, @prover]
+  where Field[N] {
+  check_fit_post_prover(coef, len - 1);
+  Fixed {
+    coef : coef,
+    len : len,
+    pplen : pplen
+  }
+}

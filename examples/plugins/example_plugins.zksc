@@ -1,0 +1,34 @@
+use Std::*;
+use Integer::*;
+use Bitextract::*;
+
+type N : Nat = 0x1fffffffffffffff;
+
+fn main()
+where Field[N], ExtendedArithmetic, Vectors, PermutationCheck, Vectorization
+{ let x_pre : uint[N] $pre @verifier = get_instance("x")
+; let y_pre : uint[N] $pre @prover = get_witness("y")
+; let x = (wire { x_pre }) as @prover
+; let y = wire { y_pre }
+; assert(__lt(x, y))
+; assert(__le(y, y))
+; assert_zero(__div(y, x) - x)
+; let len = log2(N) as u64 + 1
+; let y_bits = reverse(thaw(__bitextract(y)))
+; dbg_assert(length(y_bits) == len)
+; dbg_print(to_string(for i in 0 .. len { y_bits[i] as $pre }))
+; let y_ourbits = bitextract(y, len - 1)
+; dbg_print(to_string(for i in 0 .. len - 1 { y_ourbits[i] as $pre }))
+; for i in 0 .. len - 1 { assert_zero(y_bits[i] - y_ourbits[i] as uint[N]) }
+; let xs_pre : list[uint[N] $pre @verifier] $pre @verifier = get_instance("xs")
+; let ys_pre : list[uint[N] $pre @prover] $pre @prover = get_witness("ys")
+; let n : u64 $pre @public = get_public("n")
+; let xs = freeze(for i in 0 .. n { (wire { xs_pre[i as @verifier] }) as @prover })
+; let ys = freeze(for i in 0 .. n { wire { ys_pre[i as @prover] } })
+; assert_zero(__sum(__mul(xs, ys)) - __dotprod(xs, ys))
+; let zs = __mulc(ys, n as uint as uint[N])
+; assert_zero(__sum(__mul(xs, zs)) - (wire { n as uint as uint[N] }) as @prover * __dotprod(xs, ys))
+; let ps_pre : list[uint[N] $pre @prover] $pre @prover = get_witness("ps")
+; let ps = freeze(for i in 0 .. n { wire { ps_pre[i as @prover] } })
+; __assert_perm(xs, ps)
+}

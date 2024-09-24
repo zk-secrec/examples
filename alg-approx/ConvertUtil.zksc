@@ -1,0 +1,45 @@
+use FixedPoint::*;
+
+pub fn uint_convert[N : Nat, $S1, $S2, @D1, @D2](q: uint[N] $S1 @D1) -> uint[N] $S2 @D2
+where Field[N], @D1 <= @D2 {
+  if post $S1 {
+    if post $S2 {
+      q as @D2 as $post
+    } else {
+      q as @D2 as $pre
+    }
+  } else {
+    if post $S2 {
+    (wire{q}) as @D2
+    } else {
+      q as @D2 as $pre
+    }
+  }
+}
+
+// Not 100% sure about how safe this is
+// As long as fixed(...) only performs a bounds check then we probably don't want to perform an extra bounds-check
+// just on conversion. If p is (in)valid, it will remain so.
+pub fn fixed_convert[N : Nat, $S1, $S2, @D1, @D2](p : Fixed[N, $S1, @D1]) -> Fixed[N, $S2, @D2] where @D1 <= @D2, Field[N] {
+    Fixed {
+      coef: uint_convert(p.coef),
+      len: p.len,
+      pplen: p.pplen
+    }
+}
+
+//pub fn float_convert[N : Nat, $S1, $S2, @D1, @D2](p : Float[N, $S1, @D1]) -> Float[N, $S2, @D2] where @D1 <= @D2, Field[N] {
+//    if post $S1 {
+//        if post $S2 {
+//            float(p.sign as @D2 as $post, p.significand as @D2 as $post ,p.exponent as @D2 as $post)
+//        } else {
+//            float(p.sign as @D2 as $pre,p.significand as @D2 as $pre ,p.exponent as @D2 as $pre)
+//        }
+//    } else {
+//        if post $S2 {
+//            float((wire{p.sign}) as @D2, (wire{p.significand}) as @D2, (wire{p.exponent}) as @D2)
+//        } else {
+//              float(p.sign as @D2 as $pre, p.significand as @D2 as $pre, p.exponent as @D2 as $pre)
+//        }
+//    }    
+//}

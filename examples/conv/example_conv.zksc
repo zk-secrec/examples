@@ -1,0 +1,15 @@
+// An example program that should be compiled into the example in Subsect. 3.8 of Circuit-IR specification
+
+type N : Nat = 7;
+type M : Nat = 127;
+
+fn main() 
+where Field[N], Field[M], Convertible[N, M] 
+{ let c : uint[N] $post @prover = (wire { get_instance("c") }) as @prover
+; let a : uint[N] $post @prover = wire { get_witness("a") }
+; let b : uint[N] $post @prover = wire { get_witness("b") }
+; let c_big = c as uint[M]
+; let a_big = a as uint[M]
+; let b_big = b as uint[M]
+; assert_zero(a_big * a_big + b_big * b_big - c_big * c_big)
+}
