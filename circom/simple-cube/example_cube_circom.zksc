@@ -1,0 +1,19 @@
+// The following two moduli are supported by snarkjs.
+// Choose one.
+type N : Nat = 0x30644e72e131a029b85045b68181585d2833e84879b9709143e1f593f0000001; // PRIME=bn128
+//type N : Nat = 0x73eda753299d7d483339d80809a1d80553bda402fffe5bfeffffffff00000001; // PRIME=bls12381
+
+fn cube(x : uint[N] $post @prover) -> uint[N] @prover {
+    let a = 1;
+    let b = a * x;
+    let c = b * x;
+    let d = c * x;
+    d
+}
+
+fn main() where Field[N] {
+    let z = wire { get_instance("z") };
+    let x = wire { get_witness("x") };
+    let y = cube(x);
+    assert_zero(y - (z as @prover));
+}

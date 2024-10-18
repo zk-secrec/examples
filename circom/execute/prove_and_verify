@@ -1,0 +1,26 @@
+#!/bin/bash
+# The prefix of input files, the same as the one given after the -o option of runrust when generating those files but without the directory prefix. It must be in the current directory.
+INPUT="example"
+# PRIME must be one of the following:
+#PRIME=bn128
+#PRIME=bls12381
+export PRIME="`cat "${INPUT}_prime.txt"`"
+if [ -z "$PRIME" ]; then
+    echo "PRIME not specified: maybe the relation does not use any wires"
+    exit 1
+fi
+
+# The power specifies the maximum number of R1CS constraints to be 2^power.
+# Power can be at most 28.
+if [ -z "$POWER" ]; then
+    echo "The environment variable POWER must be set."
+    exit 1
+fi
+
+# Choose whether to use wasm or C++ for computing the values of wires
+export USE_WASM=1
+#export USE_WASM=0
+
+./generate_ptau &&
+./prove_and_verify_prepare_circuit &&
+./prove_and_verify_inputs

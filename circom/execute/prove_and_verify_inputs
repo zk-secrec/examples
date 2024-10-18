@@ -1,0 +1,28 @@
+#!/bin/bash
+# Generates a proof (in ${INPUT}_proof.json) for the witness (and instance) in ${INPUT}_prover_input.json.
+# Verifies the proof, using the verification key and the instance in ${INPUT}_verifier_input.json.
+
+# The prefix of input files, the same as the one given after the -o option of runrust when generating those files but without the directory prefix. It must be in the current directory.
+INPUT="example"
+PREFIX=tmp_prove_and_verify
+
+# Choose whether to use wasm or C++ for computing the values of wires
+# Set it the same way in ./prove_and_verify_prepare_circuit
+if [ -z "$USE_WASM" ]; then
+    #USE_WASM=1
+    USE_WASM=0
+fi
+
+# This is executed by prover:
+echo "Creating the proof"
+if [ $USE_WASM -eq 1 ]; then
+    /usr/bin/time -v snarkjs groth16 fullprove "${INPUT}_prover_input.json" "${INPUT}_js/${INPUT}.wasm" ${PREFIX}_0002.zkey ${INPUT}_proof.json ${PREFIX}_public.json || exit 1
+else
+    date
+    /usr/bin/time -v ${INPUT}_cpp/${INPUT} "${INPUT}_prover_input.json" ${INPUT}.wtns || exit 1
+    /usr/bin/time -v snarkjs groth16 prove ${PREFIX}_0002.zkey ${INPUT}.wtns ${INPUT}_proof.json ${PREFIX}_public.json || exit 1
+    date
+fi
+# This is executed by verifier:
+echo "Verifying the proof"
+/usr/bin/time -v snarkjs groth16 verify ${PREFIX}_verification_key.json "${INPUT}_verifier_input.json" ${INPUT}_proof.json

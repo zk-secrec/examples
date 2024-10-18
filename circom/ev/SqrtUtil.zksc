@@ -1,0 +1,50 @@
+use Std::*;
+use Integer::*;
+
+/**
+
+This library:
+ * takes a fixedpoint number
+ * casts it to an infinite modulus
+ * computes the square root
+ * casts the result to the resulting modulus again
+
+This is because calculating the square root can involve intermediate computations could be too big
+and not fit into the modulus even if the input and output do fit into the modulus. 
+As long as we are in pre, we can switch briefly to an infinite modulus.
+
+The other side of the coin is that intermediate values can become too small such that they are no longer
+representable numbers, resulting in a 0 output even though both the input and the output are representable numbers.
+*/
+
+pub fn sqrt_coef[@D](coef : uint $pre @D, pplen : u64 $pre @public) -> uint $pre @D {
+  let p2k = pow_pre_inf(2,pplen);
+  if (coef == 0) {
+    coef
+  } else {
+    let current = if (coef < p2k as @D) { p2k as @D } else { coef };
+    sqrt_helper(coef, current, p2k)
+  }
+}
+/*
+struct FixedInf[@D] {
+  sign : bool $pre @D,
+  coef : uint $pre @D,
+  len : uint $pre @public,
+  pplen : uint $pre @public,
+}
+
+pub fn fixedinf[@D](sign : bool $pre @D, coef : uint $pre @D, len : uint $pre @public, pplen : uint $pre @public) -> FixedInf[@D] {
+  FixedInf {
+    sign : sign,
+    coef : coef,
+    len : len,
+    pplen : pplen,
+  }
+}
+*/
+fn sqrt_helper[@D](init : uint $pre @D, current : uint $pre @D, p2k : uint $pre @public) -> uint $pre @D {
+  //(x^2+u*2^k)/(2x)
+  let next = (current*current+init*p2k as @D)/(2*current);
+  if (current <= next) { current } else { sqrt_helper(init,next,p2k) }
+}

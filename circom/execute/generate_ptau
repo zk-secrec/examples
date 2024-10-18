@@ -1,0 +1,29 @@
+#!/bin/bash
+# Generates a powers of tau ceremony for a given prime and power.
+# This is needed before ./prove_and_verify can be run for that prime and power.
+# The power specifies the maximum number of R1CS constraints to be 2^power.
+# Power can be at most 28.
+# The randomness is given on the command line using -e, which is not secure but can be used for testing.
+
+# PRIME must be one of the following:
+#PRIME=bn128
+#PRIME=bls12381
+if [ -z "$PRIME" ]; then
+    echo "The environment variable PRIME must be set."
+    exit 1
+fi
+#POWER=17
+if [ -z "$POWER" ]; then
+    echo "The environment variable POWER must be set."
+    exit 1
+fi
+PTAU="pot${POWER}_${PRIME}_final.ptau"
+if [ -f "$PTAU" ]; then
+    echo "$0 has already been run for prime $PRIME and power $POWER, it does not need to be run again"
+    exit 0
+fi
+snarkjs powersoftau new $PRIME $POWER pot${POWER}_${PRIME}_0000.ptau -v
+snarkjs powersoftau contribute pot${POWER}_${PRIME}_0000.ptau pot${POWER}_${PRIME}_0001.ptau --name="1st contribution to powersoftau" -v -e="fdsjhgowew3t4tf98gfhd"
+snarkjs powersoftau contribute pot${POWER}_${PRIME}_0001.ptau pot${POWER}_${PRIME}_0002.ptau --name="2nd contribution to powersoftau" -v -e="sdfijoiewr35rewfd"
+snarkjs powersoftau prepare phase2 pot${POWER}_${PRIME}_0002.ptau pot${POWER}_${PRIME}_final.ptau -v
+snarkjs powersoftau verify pot${POWER}_${PRIME}_final.ptau

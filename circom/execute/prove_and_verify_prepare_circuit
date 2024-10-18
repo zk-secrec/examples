@@ -1,0 +1,76 @@
+#!/bin/bash
+# This must be executed each time when a new circuit needs to be used. This part does not use prover's and verifier's inputs.
+# After that, ./prove_and_verify_inputs can be executed any number of times with different prover's and verifier's inputs, without needing to run ./prove_and_verify_prepare_circuit again.
+
+# Generates a verification key (in ${PREFIX}_0002.zkey) for the circuit in $INPUT.circom.
+# The randomness is given on the command line using -e, which is not secure but can be used for testing.
+
+# The prefix of input files, the same as the one given after the -o option of runrust when generating those files but without the directory prefix. It must be in the current directory.
+INPUT="example"
+# PRIME must be one of the following:
+#PRIME=bn128
+#PRIME=bls12381
+PRIME="`cat "${INPUT}_prime.txt"`"
+#POWER=17
+if [ -z "$POWER" ]; then
+    echo "The environment variable POWER must be set."
+    exit 1
+fi
+R1CS="$INPUT.r1cs"
+PTAU="pot${POWER}_${PRIME}_final.ptau"
+PREFIX=tmp_prove_and_verify
+
+# Choose whether to use wasm or C++ for computing the values of wires
+# Set it the same way in ./prove_and_verify_inputs
+if [ -z "$USE_WASM" ]; then
+    #USE_WASM=1
+    USE_WASM=0
+fi
+
+if [ -z "$PRIME" ]; then
+    echo "PRIME not specified: maybe the relation does not use any wires"
+    exit 1
+fi
+
+# If the circuit has changed or USE_WASM has changed, we must redo the preparation
+cp "$INPUT.circom" "${PREFIX}_circuit_being_prepared.circom"
+echo "// USE_WASM=${USE_WASM}" >> "${PREFIX}_circuit_being_prepared.circom"
+
+if [ -f "${PREFIX}_prepared_circuit.circom" ]; then
+    cmp -s "${PREFIX}_prepared_circuit.circom" "${PREFIX}_circuit_being_prepared.circom" &&
+	echo "The Circom circuit has not changed, skipping circuit preparation" &&
+	exit 0
+fi
+
+# This can be executed by prover and verifier independently:
+echo "Compiling circom"
+date
+if [ $USE_WASM -eq 1 ]; then
+    /usr/bin/time -v circom -p $PRIME "$INPUT.circom" --r1cs --wasm || exit 1
+else
+    /usr/bin/time -v circom -p $PRIME "$INPUT.circom" --r1cs --c || exit 1
+fi
+echo "Snarkjs public circuit-dependent part"
+date
+# This is executed by prover and verifier, or prover and third party trusted by verifier, or prover using public randomness:
+/usr/bin/time -v snarkjs groth16 setup "$R1CS" "$PTAU" ${PREFIX}_0000.zkey || exit 1
+/usr/bin/time -v snarkjs zkey contribute ${PREFIX}_0000.zkey ${PREFIX}_0001.zkey --name="1st contribution to zkey" -e="sglhgsjhgoie" || exit 1
+/usr/bin/time -v snarkjs zkey contribute ${PREFIX}_0001.zkey ${PREFIX}_0002.zkey --name="2nd contribution to zkey" -e="skrposf93943fgd" || exit 1
+# This is executed by prover:
+if [ $USE_WASM -eq 0 ]; then
+    date
+    echo "Preparing proof generation"
+    # Assumes that INPUT=example:
+    cp Makefile-O0 ${INPUT}_cpp/Makefile
+    cd ${INPUT}_cpp
+    /usr/bin/time -v make || exit 1
+    cd ..
+fi
+# This is executed by verifier:
+echo "Preparing verification"
+date
+/usr/bin/time -v snarkjs zkey verify "$R1CS" "$PTAU" ${PREFIX}_0002.zkey || exit 1 # Here verifier can check (by comparing the hashes, which is not done automatically here) that prover did not remove or change some of the randomness
+/usr/bin/time -v snarkjs zkey export verificationkey ${PREFIX}_0002.zkey ${PREFIX}_verification_key.json || exit 1
+date
+# Copy the prepared circuit to later check if the circuit has changed and skip circuit preparation if the circuit has not changed
+cp "${PREFIX}_circuit_being_prepared.circom" "${PREFIX}_prepared_circuit.circom"
