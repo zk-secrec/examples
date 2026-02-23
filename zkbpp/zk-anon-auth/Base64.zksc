@@ -1,0 +1,99 @@
+/*
+ * Copyright 2026 Cybernetica AS
+ *
+ * Redistribution and use in source and binary forms, with or without modification, are permitted provided that the following conditions are met:
+ * 1. Redistributions of source code must retain the above copyright notice, this list of conditions and the following disclaimer.
+ * 2. Redistributions in binary form must reproduce the above copyright notice, this list of conditions and the following disclaimer in the documentation and/or other materials provided with the distribution.
+ * 3. Neither the name of the copyright holder nor the names of its contributors may be used to endorse or promote products derived from this software without specific prior written permission.
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS “AS IS” AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ */
+ 
+use Std::*;
+use Common::*;
+
+pub fn base64(msg : arr[int[bitwise[8]] $post @prover]) -> list[int[bitwise[8]] $post @prover] where Vectorization {
+    let original_len = length(msg);
+
+    let msg : arr[int[bitwise[24]] $post @prover] = bitwise_vec_to_bitwise_vec(msg);
+    let msg : arr[int[bitwise[6]] $post @prover] = bitwise_vec_to_bitwise_vec(msg);
+
+    let num_blocks = (original_len + 47) / 48;
+    let mut out1 : list[int[bitwise[8]] $post @prover] = [];
+    for i in 0 .. num_blocks {
+        let msg_block =
+            if (i + 1 < num_blocks) {
+                msg[i * 64 .. (i + 1) * 64]
+            } else {
+                msg[i * 64 ..]
+            };
+        let out_block = base64_block(unslice(msg_block));
+        for i in 0 .. length(out_block) {
+            list_push(ref out1, out_block[i]);
+        }
+        {}
+    }
+
+    let num_groups = (original_len + 2) / 3;
+    let last_input_group_len = original_len % 3;
+    let output_len =
+        if (last_input_group_len == 0) {
+            num_groups * 4
+        } else if (last_input_group_len == 1) {
+            num_groups * 4 - 2
+        } else {
+            num_groups * 4 - 1
+        };
+    let out2 = out1[0 .. output_len];
+    out2
+}
+
+fn base64_block(out1 : arr[int[bitwise[6]] $post @prover]) -> arr[int[bitwise[8]] $post @prover] where Vectorization {
+    let output_len = length(out1);
+    let out1_tr : list[int[bitwise[64]] $post @prover] = thaw(transpose_bit_matrix_post(output_len, 6, out1));
+    //dbg_print(to_string(length(out1_tr)));
+    //dbg_print(to_string(length(out1)));
+
+    let out2_tr : list[int[bitwise[64]] $post @prover] = base64_block_helper(out1_tr);
+
+    let out2 : arr[int[bitwise[8]] $post @prover] = transpose_bit_matrix_post(7, output_len, freeze(out2_tr));
+    out2
+}
+
+sieve fn base64_block_helper(out1_tr : list[int[bitwise[64]] $post @prover]) -> list[int[bitwise[64]] $post @prover] {
+    let a1 = out1_tr[5];
+    let b1 = out1_tr[4];
+    let c1 = out1_tr[3];
+    let d1 = out1_tr[2];
+    let e1 = out1_tr[1];
+    let f1 = out1_tr[0];
+    let all_ones = 0xffffffffffffffff;
+    let a0 = a1 + all_ones;
+    let b0 = b1 + all_ones;
+    let c0 = c1 + all_ones;
+    let d0 = d1 + all_ones;
+    let e0 = e1 + all_ones;
+    // 12 multiplications to compute r1 ... r5
+    let r1 = a0*(b0 + b1*(c0 + c1*d0*e0)); // ith bit is 1 if the ith output byte is 'A'-'Z'
+    let r1_or_r2 = (a0 + a1*(b0 + b1*c0*d0));
+    let r2 = r1_or_r2 + r1; // ith bit is 1 if the ith output byte is 'a'-'z'
+    let r4_or_r5 = a1*b1*c1*d1*e1;
+    let r5 = r4_or_r5*f1; // ith bit is 1 if the ith output byte is '_'
+    let r4 = r4_or_r5 + r5; // ith bit is 1 if the ith output byte is '-'
+    let r3 = r4_or_r5 + r1_or_r2 + all_ones;
+
+    // compute the 7-bit offset to be added to the 6-bit value to get the 7-bit output (converted to 8-bit by setting the highest bit to zero)
+    // r1 * 0b1000001 + r2 * 0b1000111 + r3 * 0b1111100 + r4 * 0b1101111 + r5 * 0b0100000
+    let offset = [
+        r1 + r2 + r4,
+        r2 + r4,
+        r2 + r3 + r4,
+        r3 + r4,
+        r3,
+        r3 + r4 + r5,
+        r1 + r2 + r3 + r4
+    ];
+
+    // add the offset to the 6-bit value:
+    let out2_tr = addXor_tbm_post([f1, e1, d1, c1, b1, a1, 0], offset);
+    out2_tr
+}

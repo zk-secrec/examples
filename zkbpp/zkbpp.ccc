@@ -1,0 +1,11 @@
+version 2.1.0;
+configuration;
+
+@plugin iter_v0;
+
+@type field(greater_than(1));
+@type bitwise(greater_than(1));
+
+@convert(@out: 1, @in: 1);
+@convert(@out: 1, @in: 0);
+@convert(@out: 0, @in: 1);

@@ -1,0 +1,6 @@
+#!/bin/bash
+cd ..
+# The following line for 256-bit ECDSA.
+/usr/bin/time -v ./runrust zkbpp/zk-anon-auth/zk-anon-auth.zksc -p zkbpp/zk-anon-auth/zk-anon-auth256_public.json -i zkbpp/zk-anon-auth/zk-anon-auth256_instance.json -w zkbpp/zk-anon-auth/zk-anon-auth256_witness.json -e zkbpp/zk-anon-auth/zk-anon-auth.rs -c zkbpp/zkbpp.ccc --zkbpp -o zkbpp/generated
+# The following line for 384-bit ECDSA. Requires first commenting out and in 3 lines each at the beginning of zk-anon-auth.zksc where type synonyms are defined.
+#/usr/bin/time -v ./runrust zkbpp/zk-anon-auth/zk-anon-auth.zksc -p zkbpp/zk-anon-auth/zk-anon-auth_public.json -i zkbpp/zk-anon-auth/zk-anon-auth_instance.json -w zkbpp/zk-anon-auth/zk-anon-auth_witness.json -e zkbpp/zk-anon-auth/zk-anon-auth.rs -c zkbpp/zkbpp.ccc --zkbpp -o zkbpp/generated

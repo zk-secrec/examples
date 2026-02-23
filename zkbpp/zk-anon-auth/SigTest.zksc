@@ -1,0 +1,35 @@
+/*
+ * Copyright 2026 Cybernetica AS
+ *
+ * Redistribution and use in source and binary forms, with or without modification, are permitted provided that the following conditions are met:
+ * 1. Redistributions of source code must retain the above copyright notice, this list of conditions and the following disclaimer.
+ * 2. Redistributions in binary form must reproduce the above copyright notice, this list of conditions and the following disclaimer in the documentation and/or other materials provided with the distribution.
+ * 3. Neither the name of the copyright holder nor the names of its contributors may be used to endorse or promote products derived from this software without specific prior written permission.
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS “AS IS” AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ */
+
+// ./runrust zkbpp/zk-anon-auth/SigTest.zksc -p zkbpp/zk-anon-auth/sig_public.json -i zkbpp/zk-anon-auth/sig_instance.json -w zkbpp/zk-anon-auth/sig_witness.json -c zkbpp/zkbpp.ccc --zkbpp -o zkbpp/generated
+// ./runrust zkbpp/zk-anon-auth/SigTest.zksc -p zkbpp/zk-anon-auth/sig_public.json -i zkbpp/zk-anon-auth/sig_instance.json -c zkbpp/zkbpp.ccc --zkbpp -o zkbpp/generated-verifier --verifier
+
+use sig::*;
+
+fn main()
+    where
+        Field[P],
+        Field[Q],
+        PostConvertible[plain[Q],bitwise[384]],
+        PostConvertible[bitwise[384],plain[P]]
+{
+	let signature_pre : tuple[uint[Q] $pre @prover, uint[Q] $pre @prover] = get_witness("signature");
+	let pubkey_pre : tuple[uint[P] $pre @verifier, uint[P] $pre @verifier] = get_instance("pubkey");
+
+	let signature = ( wire { signature_pre.0 }, wire { signature_pre.1 } );
+	let pubkey = ( (wire { pubkey_pre.0 }) as @prover, (wire { pubkey_pre.1 }) as @prover );
+
+    let hash_pre : uint[Q] $pre @prover = get_witness("hash");
+    let hash2 = wire { hash_pre };
+    dbg_print(to_string(hash2 as $pre));
+	assert_checksig(hash2, pubkey, signature);
+    {}
+}
+

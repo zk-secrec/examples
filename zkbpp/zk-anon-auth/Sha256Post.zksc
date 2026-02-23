@@ -1,0 +1,281 @@
+/*
+ * Copyright 2026 Cybernetica AS
+ *
+ * Redistribution and use in source and binary forms, with or without modification, are permitted provided that the following conditions are met:
+ * 1. Redistributions of source code must retain the above copyright notice, this list of conditions and the following disclaimer.
+ * 2. Redistributions in binary form must reproduce the above copyright notice, this list of conditions and the following disclaimer in the documentation and/or other materials provided with the distribution.
+ * 3. Neither the name of the copyright holder nor the names of its contributors may be used to endorse or promote products derived from this software without specific prior written permission.
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS “AS IS” AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ */
+ 
+use Std::*;
+use Common::*;
+
+pub type BitMatrixPost : Unqualified = list[int[bitwise[32]] $post @prover]; // 64 rows of 32 bits each
+type TransposedBitMatrixPost : Unqualified = list[int[bitwise[64]] $post @prover]; // 32 rows of 64 bits each, but operations (e.g. rightrotate_tbm_post) are on 64 columns in parallel, not 32 rows in parallel
+
+fn rightrotate_tbm_post(x : TransposedBitMatrixPost, n : u64 $pre @public) -> TransposedBitMatrixPost {
+    let len = length(x);
+    for i in 0 .. len {
+        x[(i + n) % len]
+    }
+}
+
+fn rightshift_tbm_post(x : TransposedBitMatrixPost, n : u64 $pre @public) -> TransposedBitMatrixPost {
+    let len = length(x);
+    for i in 0 .. len {
+        if (i + n < len) {
+            x[i + n]
+        } else {
+            0
+        }
+    }
+}
+
+fn to_previous_round_tbm_post(x : TransposedBitMatrixPost, n : u64 $pre @public) -> TransposedBitMatrixPost
+    where PostRing[bitwise[64]]
+{
+    for i in 0 .. length(x) {
+        shrc_post(x[i], n)
+    }
+}
+
+fn to_next_round_tbm_post(x : TransposedBitMatrixPost, n : u64 $pre @public) -> TransposedBitMatrixPost
+    where PostRing[bitwise[64]]
+{
+    for i in 0 .. length(x) {
+        shlc_post(x[i], n)
+    }
+}
+
+fn from_initial_and_previous_round_tbm_post(initial_value : int[bitwise[32]] $post @prover, x : TransposedBitMatrixPost) -> TransposedBitMatrixPost
+    where PostConvertible[bitwise[32],bitwise[64]], PostRing[bitwise[64]]
+{
+    //let mut t = initial_value as int[bitwise[64]];
+    //for i in 0 .. length(x) {
+    //    let y = shlc_post(x[i], 1) + t * 1;
+    //    t = shrc_post(t, 1);
+    //    y
+    //}
+    let rec t =
+        for i in 0 .. length(x) {
+            if (i == 0) {
+                initial_value as int[bitwise[64]]
+            } else {
+                shrc_post(t[i-1], 1)
+            }
+        };
+    for i in 0 .. length(x) {
+        shlc_post(x[i], 1) + t[i] * 1
+    }
+}
+
+fn extract_last_round_tbm_post(x : TransposedBitMatrixPost) -> int[bitwise[32]] $post @prover
+    where PostConvertible[bitwise[64],bitwise[32]], PostRing[bitwise[64]]
+{
+    //let mut t : int[bitwise[64]] $post @prover = 0;
+    //for i in 0 .. length(x) {
+    //    t = t + shlc_post(shrc_post(x[i], 63), i);
+    //}
+    //t as int[bitwise[32]]
+    let rec t =
+        for i in 0 .. length(x) {
+            let t0 =
+                if (i > 0) {
+                    t[i-1]
+                } else {
+                    0
+                };
+            t0 + shlc_post(shrc_post(x[i], 63), i)
+        };
+    t[length(x) - 1] as int[bitwise[32]]
+}
+
+fn not_tbm_post(x : TransposedBitMatrixPost) -> TransposedBitMatrixPost {
+    for i in 0 .. length(x) {
+        x[i] + 0xffffffffffffffff
+    }
+}
+
+fn xor_tbm_post(x : TransposedBitMatrixPost, y : TransposedBitMatrixPost) -> TransposedBitMatrixPost {
+    for i in 0 .. length(x) {
+        x[i] + y[i]
+    }
+}
+
+fn and_tbm_post(x : TransposedBitMatrixPost, y : TransposedBitMatrixPost) -> TransposedBitMatrixPost {
+    for i in 0 .. length(x) {
+        x[i] * y[i]
+    }
+}
+
+fn assert_eq_tbm_post(x : TransposedBitMatrixPost, y : TransposedBitMatrixPost)
+    where PostRing[bitwise[64]]
+{
+    for i in 0 .. length(x) {
+        assert_zero(x[i] - y[i]);
+    }
+    {}
+}
+
+extern fn sha256_block_compute_witness_u32(h_init : list[u32 $pre @prover], msg_block : list[u32 $pre @prover]) -> tuple[list[u64 $pre @prover], list[u64 $pre @prover], list[u64 $pre @prover]];
+pub extern fn get_round_k_transposed() -> list[u64 $pre @public];
+
+fn sha256_block_compute_witness(h_init : BitMatrixPost, msg_block : arr[int[bitwise[32]] $post @prover]) -> tuple[arr[int[bitwise[64]] $post @prover], TransposedBitMatrixPost, TransposedBitMatrixPost]
+    where PostRing[bitwise[64]], Vectorization
+{
+    let h_init2 : list[u32 $pre @prover] = for i in 0 .. length(h_init) {
+        h_init[i] as $pre as u32
+    };
+    let msg_block2 : list[u32 $pre @prover] = for i in 0 .. length(msg_block) {
+        msg_block[i] as $pre as u32
+    };
+    let res = sha256_block_compute_witness_u32(h_init2, msg_block2);
+    let w =
+        array_to_post(freeze(
+            for i in 0 .. length(res.0) {
+                res.0[i] as int[bitwise[64]]
+            }));
+    let a =
+        thaw(array_to_post(freeze(
+            for i in 0 .. length(res.1) {
+                res.1[i] as int[bitwise[64]]
+            })));
+    let e =
+        thaw(array_to_post(freeze(
+            for i in 0 .. length(res.2) {
+                res.2[i] as int[bitwise[64]]
+            })));
+    (w, a, e)
+}
+
+// w, a, e are witness bit matrices computed by prover locally
+// k is the transposed round constant matrix
+sieve fn check_sha256_block_post(h_init : BitMatrixPost, k : TransposedBitMatrixPost, w : TransposedBitMatrixPost, a : TransposedBitMatrixPost, e : TransposedBitMatrixPost) -> BitMatrixPost
+    where PostRing[bitwise[64]], PostConvertible[bitwise[32],bitwise[64]], PostConvertible[bitwise[64],bitwise[32]], Vectorization
+{
+    dbg_assert(length(h_init) == 8);
+    dbg_assert(length(k) == 32);
+    dbg_assert(length(w) == 32);
+    dbg_assert(length(a) == 32);
+    dbg_assert(length(e) == 32);
+
+    let w_2 : TransposedBitMatrixPost = to_next_round_tbm_post(w, 2);
+    let w_7 : TransposedBitMatrixPost = to_next_round_tbm_post(w, 7);
+    let w_15 : TransposedBitMatrixPost = to_next_round_tbm_post(w, 15);
+    let w_16 : TransposedBitMatrixPost = to_next_round_tbm_post(w, 16);
+    let s0 : TransposedBitMatrixPost = xor_tbm_post(rightrotate_tbm_post(w_15, 7), xor_tbm_post(rightrotate_tbm_post(w_15, 18), rightshift_tbm_post(w_15, 3)));
+    let s1 : TransposedBitMatrixPost = xor_tbm_post(rightrotate_tbm_post(w_2, 17), xor_tbm_post(rightrotate_tbm_post(w_2, 19), rightshift_tbm_post(w_2, 10)));
+    assert_eq_tbm_post(to_previous_round_tbm_post(w, 16), to_previous_round_tbm_post(addXor_tbm_post(addXor_tbm_post(w_16, s0), addXor_tbm_post(w_7, s1)), 16));
+
+    // jth bit of b[i] is the ith bit of b in jth round
+    let b : TransposedBitMatrixPost = from_initial_and_previous_round_tbm_post(h_init[1], a);
+    let c : TransposedBitMatrixPost = from_initial_and_previous_round_tbm_post(h_init[2], b);
+    let d : TransposedBitMatrixPost = from_initial_and_previous_round_tbm_post(h_init[3], c);
+    let f : TransposedBitMatrixPost = from_initial_and_previous_round_tbm_post(h_init[5], e);
+    let g : TransposedBitMatrixPost = from_initial_and_previous_round_tbm_post(h_init[6], f);
+    let h : TransposedBitMatrixPost = from_initial_and_previous_round_tbm_post(h_init[7], g);
+    let S1 : TransposedBitMatrixPost = xor_tbm_post(rightrotate_tbm_post(e, 6), xor_tbm_post(rightrotate_tbm_post(e, 11), rightrotate_tbm_post(e, 25)));
+    let ch : TransposedBitMatrixPost = xor_tbm_post(and_tbm_post(e, f), and_tbm_post(not_tbm_post(e), g));
+    let temp1 : TransposedBitMatrixPost = addXor_tbm_post(h, addXor_tbm_post(S1, addXor_tbm_post(ch, addXor_tbm_post(k, w))));
+    let S0 : TransposedBitMatrixPost = xor_tbm_post(rightrotate_tbm_post(a, 2), xor_tbm_post(rightrotate_tbm_post(a, 13), rightrotate_tbm_post(a, 22)));
+    let maj : TransposedBitMatrixPost = xor_tbm_post(and_tbm_post(a, b), xor_tbm_post(and_tbm_post(a, c), and_tbm_post(b, c)));
+    let temp2 : TransposedBitMatrixPost = addXor_tbm_post(S0, maj);
+    let e_next : TransposedBitMatrixPost = addXor_tbm_post(d, temp1);
+    let a_next : TransposedBitMatrixPost = addXor_tbm_post(temp1, temp2);
+    assert_eq_tbm_post(a, from_initial_and_previous_round_tbm_post(h_init[0], a_next));
+    assert_eq_tbm_post(e, from_initial_and_previous_round_tbm_post(h_init[4], e_next));
+
+    [
+        extract_last_round_tbm_post(a_next),
+        extract_last_round_tbm_post(a),
+        extract_last_round_tbm_post(b),
+        extract_last_round_tbm_post(c),
+        extract_last_round_tbm_post(e_next),
+        extract_last_round_tbm_post(e),
+        extract_last_round_tbm_post(f),
+        extract_last_round_tbm_post(g)
+    ]
+}
+
+fn sha256_block_post(ref axc : AddXorChecker, k : TransposedBitMatrixPost, h_init : BitMatrixPost, msg_block : arr[int[bitwise[32]] $post @prover]) -> BitMatrixPost
+    where
+        PostRing[bitwise[32]],
+        PostRing[bitwise[64]],
+        PostConvertible[bitwise[64],bitwise[32]],
+        PostConvertible[bitwise[32],bitwise[64]],
+        Vectorization
+{
+    //dbg_print("sha256_block_post" : string);
+    let witn = sha256_block_compute_witness(h_init, msg_block);
+    let w0 : arr[int[bitwise[64]] $post @prover] = transpose_bit_matrix_post(16, 32, msg_block);
+    let w = witn.0;
+    let f = sieve fn (w_i, w0_i) {
+        assert_zero(w_i * 0xffff + w0_i);
+    };
+    let trash : arr[() $pre @public] = f.(w, w0);
+
+    let a_to_h_out = check_sha256_block_post(h_init, k, thaw(w), witn.1, witn.2);
+    let h_out = for i in 0 .. length(h_init) {
+        add_xor(ref axc, h_init[i], a_to_h_out[i])
+    };
+    h_out
+}
+
+pub fn get_h_init() -> BitMatrixPost {
+    [0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19]
+}
+
+pub fn sha256(ref axc : AddXorChecker, k : TransposedBitMatrixPost, h_init : BitMatrixPost, msg : arr[int[bitwise[8]] $post @prover]) -> BitMatrixPost
+    where
+        PostRing[bitwise[8]],
+        PostRing[bitwise[32]],
+        PostRing[bitwise[64]],
+        PostConvertible[bitwise[8],bitwise[32]],
+        PostConvertible[bitwise[64],bitwise[32]],
+        PostConvertible[bitwise[32],bitwise[64]],
+        Vectorization
+{
+    let original_len = length(msg);
+    let padded_len = (original_len + (9 + 63)) / 64 * 64; // add 9 bytes, round up to multiple of 64 bytes
+    let mut t : u64 $pre @public = original_len * 8; // in bits
+    let length_bytes : list[int[bitwise[8]] $pre @public] =
+        for i in 0 .. 8 {
+            let b = t % 256;
+            t = t / 256;
+            b as int[bitwise[8]]
+        };
+    let padding_len = padded_len - original_len;
+    let padding =
+        array_to_prover_bitwise(array_to_post(freeze(
+            for i in 0 .. padding_len {
+                if i == 0 {
+                    0x80
+                } else if i + 8 < padding_len {
+                    0
+                } else {
+                    length_bytes[padding_len - 1 - i]
+                }
+            })));
+    let padded_msg = concat_vec(msg, padding);
+    let num_blocks = padded_len / 64;
+    let padded_msg : arr[int[bitwise[32]] $post @prover] = bitwise_vec_to_bitwise_vec(padded_msg);
+    let msg_blocks : list[arr[int[bitwise[32]] $post @prover]] =
+        for i in 0 .. num_blocks {
+            unslice(padded_msg[i * 16 .. (i + 1) * 16])
+        };
+    let rec h =
+        for i in 0 .. num_blocks {
+            //for j in 0 .. 16 {
+            //    dbg_print((to_string(j as @prover) ++ ": ") ++ to_string(msg_blocks[i][j] as $pre));
+            //}
+            let h_in =
+                if (i == 0) {
+                    h_init
+                } else {
+                    h[i-1]
+                };
+            sha256_block_post(ref axc, k, h_in, msg_blocks[i])
+        };
+    h[num_blocks - 1]
+}

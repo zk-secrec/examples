@@ -1,0 +1,379 @@
+/*
+ * Copyright 2026 Cybernetica AS
+ *
+ * Redistribution and use in source and binary forms, with or without modification, are permitted provided that the following conditions are met:
+ * 1. Redistributions of source code must retain the above copyright notice, this list of conditions and the following disclaimer.
+ * 2. Redistributions in binary form must reproduce the above copyright notice, this list of conditions and the following disclaimer in the documentation and/or other materials provided with the distribution.
+ * 3. Neither the name of the copyright holder nor the names of its contributors may be used to endorse or promote products derived from this software without specific prior written permission.
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS “AS IS” AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ */
+
+use Std::*;
+use Common::*;
+
+pub type P384 : Nat = 39402006196394479212279040100143613805079739270465446667948293404245721771496870329047266088258938001861606973112319;
+pub type Q384 : Nat = 39402006196394479212279040100143613805079739270465446667946905279627659399113263569398956308152294913554433653942643;
+
+pub type P256 : Nat = 115792089210356248762697446949407573530086143415290314195533631308867097853951;
+pub type Q256 : Nat = 115792089210356248762697446949407573529996955224135760342422259061068512044369;
+
+type ecpointnz[P : Nat, @D] : Qualified = tuple[uint[P] $post @D, uint[P] $post @D] $pre;
+type ecpointnzPre[P : Nat, @D] : Qualified = tuple[uint[P] $pre @D, uint[P] $pre @D] $pre;
+
+fn extractbits_short[@D](x : uint $pre @D, numbits : u64 $pre @public) -> list[bool $pre @D] {
+    let rec xx : list[uint $pre @D] = for i in 0 .. numbits {
+        if (i == 0) { x } else { xx[i-1] / 2 }
+    };
+    for i in 0 .. numbits {
+        let b = xx[i] % 2;
+        b == 1
+    }
+}
+
+fn check_bitPextract[N : Nat, @D](x : uint[N] $post @D, xb : list[bool[N] $post @D]) where Field[N] {
+    let rec partialsums : list[uint[N] $post @D] =
+        for i in 0 .. field_bit_width(N) {
+            if (i == 0) {
+                xb[field_bit_width(N) - 1] as uint[N]
+            }
+            else {
+                let t = partialsums[i-1];
+                t + t + (xb[field_bit_width(N) - i - 1] as uint[N])
+            }
+        };
+    assert_zero(x - partialsums[field_bit_width(N) - 1]);
+}
+
+fn bitPextract[N : Nat, @D](x : uint[N] $post @D) -> list[bool[N] $post @D] where Field[N] {
+    if @D <= @verifier {
+	    let tmp = extractbits_short((x as $pre) as uint, field_bit_width(N));
+	    for i in 0 .. field_bit_width(N) {
+	    	wire { tmp[i] as bool[N] }
+	    }
+    } else {
+	    let tmp = extractbits_short((x as $pre) as uint, field_bit_width(N));
+	    let xb = for i in 0 .. field_bit_width(N) {
+	    	wire { tmp[i] as bool[N] }
+	    };
+		check_bitPextract(x, xb);
+		xb
+    }
+}
+
+fn divide_modulo_P[P : Nat](x : uint[P] $post @prover, y : uint[P] $post @prover) -> uint[P] $post @prover where Field[P] {
+    let r : uint[P] $post @prover = wire { mod_div(x as $pre, y as $pre) };
+    assert_zero(r * y - x);
+    r
+}
+
+fn divide_modulo_Q[Q : Nat](x : uint[Q] $post @prover, y : uint[Q] $post @prover) -> uint[Q] $post @prover where Field[Q] {
+    divide_modulo_P(x, y)
+}
+
+fn divide_modulo_P_public[P : Nat](x : uint[P] $post @public, y : uint[P] $post @public) -> uint[P] $post @public where Field[P] {
+    let r : uint[P] $post @public = wire { mod_div(x as $pre, y as $pre) };
+    r
+}
+
+fn compute_fixpowers_pre[P : Nat, @D](num_bits : u64 $pre @public, bits_per_block : u64 $pre @public, G : tuple[uint[P] $pre @D, uint[P] $pre @D]) -> list[list[ecpointnzPre[P, @D]]] where Field[P] {
+    let num_blocks = (num_bits + bits_per_block - 1) / bits_per_block;
+    let block_size = shlc_pre(1, bits_per_block) - 1;
+    let rec H = for i in 0 .. num_blocks {
+        let rec Hr = for j in 0 .. block_size {
+            if (i == 0) {
+                if (j == 0) {
+                    G
+                } else {
+                    if (j == 1) {
+                        ec_dbl_pre(G)
+                    } else {
+                        ec_add_pre(Hr[j-1], G)
+                    }
+                }
+            } else {
+                if (j == 0) {
+                    ec_add_pre(H[i-1][block_size - 1], H[i-1][0])
+                } else {
+                    if (j == 1) {
+                        ec_dbl_pre(Hr[0])
+                    } else {
+                        ec_add_pre(Hr[j-1], Hr[0])
+                    }
+                }
+            }
+        };
+        Hr
+    };
+    H
+}
+
+fn compute_fixpowers_pre_flattened[P : Nat, @D](num_bits : u64 $pre @public, bits_per_block : u64 $pre @public, G : tuple[uint[P] $pre @D, uint[P] $pre @D]) -> list[uint[P] $pre @D] where Field[P] {
+    let mut res = [];
+    let fp = compute_fixpowers_pre(num_bits, bits_per_block, G);
+    for i in 0 .. length(fp) {
+        let x = fp[i];
+        for j in 0 .. length(x) {
+            list_push(ref res, x[j].0);
+            list_push(ref res, x[j].1);
+        }
+        {}
+    }
+    res
+}
+
+fn compute_fixpowers[P : Nat](num_bits : u64 $pre @public) -> list[list[ecpointnz[P, @public]]] where Field[P] {
+    let G_pre : tuple[uint[P] $pre @public, uint[P] $pre @public] = get_public("G");
+    let G = ( (wire { G_pre.0 }), (wire { G_pre.1 }) );
+    let fp = compute_fixpowers_pre(num_bits, 3, G_pre);
+    for i in 0 .. length(fp) {
+        let x = fp[i];
+        for j in 0 .. length(x) {
+            (wire { x[j].0 }, wire { x[j].1 })
+        }
+    }
+}
+
+sieve fn choose_in_ecpt[P : Nat](b : uint[P] $post @prover, t : tuple[uint[P] $post @prover, uint[P] $post @prover], f : tuple[uint[P] $post @prover, uint[P] $post @prover]) -> tuple[uint[P] $post @prover, uint[P] $post @prover] {
+	(f.0 + b * (t.0 - f.0), f.1 + b * (t.1 - f.1))
+}
+
+sieve fn ec_add[P : Nat](x : tuple[uint[P] $post @prover, uint[P] $post @prover], y : tuple[uint[P] $post @prover, uint[P] $post @prover]) -> tuple[uint[P] $post @prover, uint[P] $post @prover] where Field[P] {
+	let s : uint[P] $post @prover = divide_modulo_P(x.1 - y.1, x.0 - y.0);
+	let z0 : uint[P] $post @prover = s * s - x.0 - y.0;
+	let z1 : uint[P] $post @prover = - (x.1 + s * (z0 - x.0));
+	(z0, z1)
+} // will nope out, if the x-coordinates of the points are equal
+
+fn ec_add_pre[@D, P : Nat](x : tuple[uint[P] $pre @D, uint[P] $pre @D], y : tuple[uint[P] $pre @D, uint[P] $pre @D]) -> tuple[uint[P] $pre @D, uint[P] $pre @D] where Field[P] {
+	let s : uint[P] $pre @D = mod_div(x.1 - y.1, x.0 - y.0);
+	let z0 : uint[P] $pre @D = s * s - x.0 - y.0;
+	let z1 : uint[P] $pre @D = - (x.1 + s * (z0 - x.0));
+	(z0, z1)
+} // will nope out, if the x-coordinates of the points are equal
+
+// public version must not be a sieve function
+fn ec_add_public[P : Nat](x : tuple[uint[P] $post @public, uint[P] $post @public], y : tuple[uint[P] $post @public, uint[P] $post @public]) -> tuple[uint[P] $post @public, uint[P] $post @public] where Field[P] {
+	let s : uint[P] $post @public = divide_modulo_P_public(x.1 - y.1, x.0 - y.0);
+	let z0 : uint[P] $post @public = s * s - x.0 - y.0;
+	let z1 : uint[P] $post @public = - (x.1 + s * (z0 - x.0));
+	(z0, z1)
+} // will nope out, if the x-coordinates of the points are equal
+
+sieve fn ec_dbl[P : Nat](x : tuple[uint[P] $post @prover, uint[P] $post @prover]) -> tuple[uint[P] $post @prover, uint[P] $post @prover] where Field[P] {
+    let x02 = x.0 * x.0;
+	let s : uint[P] $post @prover = divide_modulo_P(x02 + x02 + x02 - 3, x.1 + x.1);  // Here "-3" comes from the EC equation
+	let z0 : uint[P] $post @prover = s * s - (x.0 + x.0);
+	let z1 : uint[P] $post @prover = - (x.1 + s * (z0 - x.0));
+	(z0, z1)
+} // will nope out, if the y-coordinate is 0
+
+fn ec_dbl_pre[@D, P : Nat](x : tuple[uint[P] $pre @D, uint[P] $pre @D]) -> tuple[uint[P] $pre @D, uint[P] $pre @D] where Field[P] {
+    let x02 = x.0 * x.0;
+	let s : uint[P] $pre @D = mod_div(x02 + x02 + x02 - 3, x.1 + x.1);  // Here "-3" comes from the EC equation
+	let z0 : uint[P] $pre @D = s * s - (x.0 + x.0);
+	let z1 : uint[P] $pre @D = - (x.1 + s * (z0 - x.0));
+	(z0, z1)
+} // will nope out, if the y-coordinate is 0
+
+// public version must not be a sieve function
+fn ec_dbl_public[P : Nat](x : tuple[uint[P] $post @public, uint[P] $post @public]) -> tuple[uint[P] $post @public, uint[P] $post @public] where Field[P] {
+    let x02 = x.0 * x.0;
+	let s : uint[P] $post @public = divide_modulo_P_public(x02 + x02 + x02 - 3, x.1 + x.1);  // Here "-3" comes from the EC equation
+	let z0 : uint[P] $post @public = s * s - (x.0 + x.0);
+	let z1 : uint[P] $post @public = - (x.1 + s * (z0 - x.0));
+	(z0, z1)
+} // will nope out, if the y-coordinate is 0
+
+fn ec_scmult[P : Nat](x : ecpointnz[P, @prover], pw0 : uint[P] $post @prover) -> ecpointnz[P, @prover] where Field[P] {
+    // Subtract 1 from the scalar but take x as the starting value r, to which x * (pw0-1) is added.
+    // If pw0-1 >= 2 then the first value of the form x * 2^i added to r has i >= 2
+    // and thus is different from x and ec_add does not get a divide by zero.
+    // The following values added to r have x multiplied by a smaller value than in r and thus are different from r
+    // because values of the form x * 2^i are added in decreasing order of i.
+    dbg_assert(pw0 as $pre >= 3 | pw0 as $pre == 1); // does not work if pw0 is 0 or 2
+    let pw = bitPextract(pw0 - 1);
+    let rec x_times_pow2 : list[ecpointnz[P, @prover]] =
+        for i in 0 .. length(pw) {
+            if (i == 0) {
+                x // x * 2^0
+            } else {
+                ec_dbl(x_times_pow2[i-1]) // x * 2^i
+            }
+        };
+    let m = length(pw) - 1;
+    let mut r = x;
+    for j in 0 .. length(pw) {
+        let i = m - j;
+        r = choose_in_ecpt(pw[i] as uint[P], ec_add(r, x_times_pow2[i]), r);
+    }
+    r
+} // 9 multiplications in ZZ_P per bit in the exponent pw.
+
+fn ec_add_from_window[P : Nat](st : ecpointnz[P, @prover], wnd : list[ecpointnz[P, @public]], s0 : bool[P] $post @prover, s1 : bool[P] $post @prover, s2 : bool[P] $post @prover)
+        -> ecpointnz[P, @prover]
+        where Field[P]
+{
+    let v0 = s0 as uint[P];
+    let v1 = s1 as uint[P];
+    let v2 = s2 as uint[P];
+    let v1and2 = v1 * v2;                                               // 1 multiplication
+    let xwnd = for i in 0 .. length(wnd) {
+        (wnd[i]).0 as @prover
+    };
+    let ywnd = for i in 0 .. length(wnd) {
+        (wnd[i]).1 as @prover
+    };
+    let threezero = (1 - v0) * (1 - v1 - v2 + v1and2);                  // 1 multiplication
+    let x_odd = xwnd[0] + v1 * (xwnd[2] - xwnd[0]) + v2 * (xwnd[4] - xwnd[0]) + v1and2 * (xwnd[6] + xwnd[0] - xwnd[2] - xwnd[4]);
+    let x_even = 1 + v1 * (xwnd[1] - 1) + v2 * (xwnd[3] - 1) + v1and2 * (xwnd[5] + 1 - xwnd[1] - xwnd[3]);
+    let y_odd = ywnd[0] + v1 * (ywnd[2] - ywnd[0]) + v2 * (ywnd[4] - ywnd[0]) + v1and2 * (ywnd[6] + ywnd[0] - ywnd[2] - ywnd[4]);
+    let y_even = v1 * ywnd[1] + v2 * ywnd[3] + v1and2 * (ywnd[5] - ywnd[1] - ywnd[3]);
+    let x = x_even + v0 * (x_odd - x_even);                             // 1 multiplication
+    let y = y_even + v0 * (y_odd - y_even);                             // 1 multiplication
+    let newpoint = (x,y);
+    let r = ec_add(st, newpoint);                                       // 3 multiplications
+    choose_in_ecpt(threezero, st, r)                                    // 2 multiplications
+}
+
+extern fn mulv[P : Nat](x : uint[P] $post @prover, c : uint[P] $pre @verifier) -> uint[P] $post @prover;
+
+fn constv[P : Nat](c : uint[P] $pre @verifier) -> uint[P] $post @prover where Field[P] {
+    (wire { c }) as @prover
+}
+
+fn ec_add_from_window_verifier[P : Nat](st : ecpointnz[P, @prover], wnd : list[ecpointnzPre[P, @verifier]], s0 : bool[P] $post @prover, s1 : bool[P] $post @prover, s2 : bool[P] $post @prover)
+        -> ecpointnz[P, @prover]
+        where Field[P]
+{
+    let v0 = s0 as uint[P];
+    let v1 = s1 as uint[P];
+    let v2 = s2 as uint[P];
+    let v1and2 = v1 * v2;                                               // 1 multiplication
+    let xwnd = for i in 0 .. length(wnd) {
+        (wnd[i]).0
+    };
+    let ywnd = for i in 0 .. length(wnd) {
+        (wnd[i]).1
+    };
+    let threezero = (1 - v0) * (1 - v1 - v2 + v1and2);                  // 1 multiplication
+    let x_odd = constv(xwnd[0]) + mulv(v1, xwnd[2] - xwnd[0]) + mulv(v2, xwnd[4] - xwnd[0]) + mulv(v1and2, xwnd[6] + xwnd[0] - xwnd[2] - xwnd[4]);
+    let x_even = 1 + mulv(v1, xwnd[1] - 1) + mulv(v2, xwnd[3] - 1) + mulv(v1and2, xwnd[5] + 1 - xwnd[1] - xwnd[3]);
+    let y_odd = constv(ywnd[0]) + mulv(v1, ywnd[2] - ywnd[0]) + mulv(v2, ywnd[4] - ywnd[0]) + mulv(v1and2, ywnd[6] + ywnd[0] - ywnd[2] - ywnd[4]);
+    let y_even = mulv(v1, ywnd[1]) + mulv(v2, ywnd[3]) + mulv(v1and2, ywnd[5] - ywnd[1] - ywnd[3]);
+    let x = x_even + v0 * (x_odd - x_even);                             // 1 multiplication
+    let y = y_even + v0 * (y_odd - y_even);                             // 1 multiplication
+    let newpoint = (x,y);
+    let r = ec_add(st, newpoint);                                       // 3 multiplications
+    choose_in_ecpt(threezero, st, r)                                    // 2 multiplications
+}
+
+fn ec_scmult_fixbase[P : Nat](num_bits : u64 $pre @public, fp : list[list[ecpointnz[P, @public]]], pw0 : uint[P] $post @prover) -> ecpointnz[P, @prover] where Field[P] {
+    dbg_assert(pw0 as $pre >= 3 | pw0 as $pre == 1); // does not work if pw0 is 0 or 2
+    let pw = bitPextract(pw0 - 1);
+    let mut r = (fp[0][0].0 as @prover, fp[0][0].1 as @prover); // G
+    let num_full_blocks = num_bits / 3;
+    let non_full_block_size = num_bits % 3;
+    if (non_full_block_size == 1) {
+        let i = num_full_blocks;
+        r = ec_add_from_window(r, fp[i], pw[3*i], false, false);
+    } else if (non_full_block_size == 2) {
+        let i = num_full_blocks;
+        r = ec_add_from_window(r, fp[i], pw[3*i], pw[3*i+1], false);
+    }
+    for j in 0 .. num_full_blocks {
+        let i = num_full_blocks - 1 - j;
+        r = ec_add_from_window(r, fp[i], pw[3*i], pw[3*i+1], pw[3*i+2]);
+    }
+    r
+}
+
+fn ec_scmult_fixbase_verifier[P : Nat](num_bits : u64 $pre @public, fp : list[list[ecpointnzPre[P, @verifier]]], pw0 : uint[P] $post @prover) -> ecpointnz[P, @prover] where Field[P] {
+    dbg_assert(pw0 as $pre >= 3 | pw0 as $pre == 1); // does not work if pw0 is 0 or 2
+    let pw = bitPextract(pw0 - 1);
+    let mut r = (constv(fp[0][0].0), constv(fp[0][0].1)); // G
+    let num_full_blocks = num_bits / 3;
+    let non_full_block_size = num_bits % 3;
+    if (non_full_block_size == 1) {
+        let i = num_full_blocks;
+        r = ec_add_from_window_verifier(r, fp[i], pw[3*i], false, false);
+    } else if (non_full_block_size == 2) {
+        let i = num_full_blocks;
+        r = ec_add_from_window_verifier(r, fp[i], pw[3*i], pw[3*i+1], false);
+    }
+    for j in 0 .. num_full_blocks {
+        let i = num_full_blocks - 1 - j;
+        r = ec_add_from_window_verifier(r, fp[i], pw[3*i], pw[3*i+1], pw[3*i+2]);
+    }
+    r
+}
+
+extern fn ecdsa_verification[P : Nat, Q : Nat](
+        bits_per_block : u64 $pre @public,
+        fixpowers1 : list[uint[P] $pre @public],
+        scalar1 : uint[Q] $post @prover,
+        fixpowers2 : list[uint[P] $pre @verifier],
+        scalar2 : uint[Q] $post @prover,
+        r_x : uint[P] $post @prover,
+        r_y : uint[P] $post @prover
+);
+
+fn assert_on_curve[P : Nat](b : uint[P] $post @prover, x : uint[P] $post @prover, y : uint[P] $post @prover) where Field[P] {
+    assert_zero(y*y - (x*x*x - 3*x + b));
+}
+
+// z: digest.
+// pk: public key - a point on an elliptic curve.
+// S: a signature: two exponents
+pub fn assert_checksig[Bitwise : Ring, P : Nat, Q : Nat](
+        z : list[int[bitwise[32]] $post @prover],
+        pk : tuple[uint[P] $pre @verifier, uint[P] $pre @verifier],
+        S : tuple[uint[Q] $post @prover, uint[Q] $post @prover])
+    where
+        Field[P],
+        Field[Q],
+        PostConvertible[bitwise[32],Bitwise],
+        PostConvertible[plain[Q],Bitwise],
+        PostConvertible[Bitwise,plain[P]],
+        PostConvertible[Bitwise,plain[Q]]
+{
+    // These lines are needed for both versions:
+    let h2 = for i in 0 .. length(z) { z[i] as int[Bitwise] };
+    let rec h3 =
+        for i in 0 .. length(z) {
+            if (i == 0) {
+                h2[i]
+            } else {
+                shlc_post(h3[i-1], 32) + h2[i]
+            }
+        };
+    let z_as_exp = h3[length(z)-1] as uint[Q];
+    dbg_print(to_string(z_as_exp as $pre));
+    let u_q : uint[Q] $post @prover = divide_modulo_Q(z_as_exp, S.1);
+    let v_q : uint[Q] $post @prover = divide_modulo_Q(S.0, S.1);
+    let r_p : uint[P] $post @prover = S.0 as int[Bitwise] as uint[P];
+    let num_bits : u64 $pre @public = field_bit_width(P);
+    dbg_print("num_bits: " ++ to_string(num_bits));
+
+    // The version with EC operations in ZK-SecreC:
+    //let u_p : uint[P] $post @prover = u_q as int[Bitwise] as uint[P];
+    //let v_p : uint[P] $post @prover = v_q as int[Bitwise] as uint[P];
+    //let Z : tuple[uint[P] $post @prover, uint[P] $post @prover] =
+    //        ec_add(ec_scmult_fixbase(num_bits, compute_fixpowers(num_bits), u_p),
+    //                ec_scmult_fixbase_verifier(num_bits, compute_fixpowers_pre(num_bits, 3, pk), v_p));
+    //assert_zero(Z.0 - r_p);
+
+    // The version with EC operations built into the modified ZKB++:
+    let bits_per_block = if (num_bits == 384) { 6 } else { 6 };
+    dbg_print("bits_per_block: " ++ to_string(bits_per_block));
+    let y_p : uint[P] $post @prover = wire { get_witness("sig_y_coord") };
+    let b =
+        if (num_bits == 384) { 27580193559959705877849011840389048093056905856361568521428707301988689241309860865136260764883745107765439761230575 }
+        else if (num_bits == 256) { 41058363725152142129326129780047268409114441015993725554835256314039467401291 }
+        else { 0 };
+    assert_on_curve(b, r_p, y_p);
+    let fp2 = compute_fixpowers_pre_flattened(num_bits, bits_per_block, pk);
+    let G_pre : tuple[uint[P] $pre @public, uint[P] $pre @public] = get_public("G");
+    let fp1 = compute_fixpowers_pre_flattened(num_bits, bits_per_block, G_pre);
+    ecdsa_verification(bits_per_block, fp1, u_q, fp2, v_q, r_p, y_p);
+    {}
+}

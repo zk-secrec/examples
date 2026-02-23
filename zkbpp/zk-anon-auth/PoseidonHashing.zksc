@@ -1,0 +1,114 @@
+/*
+ * Copyright 2026 Cybernetica AS
+ *
+ * Redistribution and use in source and binary forms, with or without modification, are permitted provided that the following conditions are met:
+ * 1. Redistributions of source code must retain the above copyright notice, this list of conditions and the following disclaimer.
+ * 2. Redistributions in binary form must reproduce the above copyright notice, this list of conditions and the following disclaimer in the documentation and/or other materials provided with the distribution.
+ * 3. Neither the name of the copyright holder nor the names of its contributors may be used to endorse or promote products derived from this software without specific prior written permission.
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS “AS IS” AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ */
+ 
+use Std::*;
+use PoseidonFuncGates::*;
+use Common::*;
+
+pub struct PoseidonParams[N : Nat, $S, @D] {
+    t : uint[N] $post @public, 
+    r : uint[N] $post @public, 
+    o : uint[N] $post @public, 
+    alpha : uint[N] $post @public,
+    R_F : uint[N] $post @public, 
+    R_P : uint[N] $post @public, 
+    round_constants : list[uint[N] $S @D], 
+    mds_matrix : list[list[uint[N] $S @D]],
+    rate_first : bool $pre @public
+}
+
+pub fn read_poseidon_params[N : Nat]() -> PoseidonParams[N, $post, @public] 
+  where Field[N] {
+  // Poseidon parameters
+  let t : uint[N] $post @public = wire{get_public("t")};
+  let r : uint[N] $post @public = wire{get_public("r")};
+  let o : uint[N] $post @public = wire{get_public("o")};
+  let alpha : uint[N] $post @public = wire{get_public("alpha")};
+  let R_F : uint[N] $post @public = wire{get_public("R_F")};
+  let R_P : uint[N] $post @public = wire{get_public("R_P")};
+  let round_constants_pre : list[uint[N] $pre @public] = get_public("round_constants");
+  let mds_matrix_pre : list[list[uint[N] $pre @public]] = get_public("mds_matrix");
+
+  let round_constants : list[uint[N] $post @public] = 
+  for i in 0..length(round_constants_pre) {
+    wire{round_constants_pre[i]}
+  };
+  let mds_matrix : list[list[uint[N] $post @public]] =
+  for i in 0..length(mds_matrix_pre) {
+    let row : list[uint[N] $post @public] = 
+    for j in 0..length(mds_matrix_pre[i]) {
+      wire{mds_matrix_pre[i][j]}
+    };
+    row
+  };
+
+  let hash_params : PoseidonParams[N, $post, @public] = PoseidonParams {
+    t : t,
+    r : r,
+    o : o,
+    alpha : alpha,
+    R_F : R_F,
+    R_P : R_P,
+    round_constants : round_constants,
+    mds_matrix : mds_matrix,
+    rate_first : true
+  };
+
+  hash_params
+}
+
+pub fn poseidon_hash[N : Nat](hash_params : PoseidonParams[N, $post, @public], data : list[uint[N] $post @prover]) -> list[uint[N] $post @prover]
+  where Field[N], Vectorization {
+  let r = hash_params.r as $pre as u64;
+  let data =
+    if (length(data) % r == 0) {
+        data
+    } else {
+        let oldlen = length(data);
+        let newlen = (oldlen + r - 1) / r * r;
+        for i in 0 .. newlen {
+            if (i < oldlen) {
+                data[i]
+            } else {
+                0
+            }
+        }
+    };
+  let hash = poseidon(data, hash_params.t, hash_params.r, hash_params.o, hash_params.alpha, hash_params.R_F, hash_params.R_P, hash_params.round_constants, hash_params.mds_matrix, hash_params.rate_first);
+  hash
+}
+
+pub type PoseidonN : Nat = 0x1FFFFFFFFFFFFFFF;
+
+pub fn poseidon_hash_8bit(hash_params : PoseidonParams[PoseidonN, $post, @public], data : list[int[bitwise[8]] $post @prover]) -> list[int[bitwise[8]] $post @prover]
+    where
+        Field[PoseidonN],
+        PostConvertible[bitwise[56],bitwise[61]],
+        PostConvertible[bitwise[61],bitwise[64]],
+        PostConvertible[bitwise[61],plain[PoseidonN]],
+        PostConvertible[plain[PoseidonN],bitwise[61]],
+        Vectorization
+{
+    let data_56 : arr[int[bitwise[56]] $post @prover] = bitwise_vec_to_bitwise_vec(freeze(data));
+    let data_61 =
+        for i in 0 .. length(data_56) {
+            data_56[i] as int[bitwise[61]] as uint[PoseidonN]
+        };
+    dbg_print("data_61 length: " ++ to_string(length(data_61)));
+    let hash = poseidon_hash(hash_params, data_61);
+    let hash_64 =
+        for i in 0 .. length(hash) {
+            hash[i] as int[bitwise[61]] as int[bitwise[64]]
+        };
+    let hash_8 : arr[int[bitwise[8]] $post @prover] = bitwise_vec_to_bitwise_vec(freeze(hash_64));
+    thaw(hash_8)
+}
+
+

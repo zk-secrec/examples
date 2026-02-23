@@ -1,0 +1,41 @@
+#!/bin/bash
+# First run runrust in the compiler directory with the options -c zkbpp/zkbpp.ccc --zkbpp -o zkbpp/generated, e.g.
+#   ./runrust FILENAME.zksc -c zkbpp/zkbpp.ccc --zkbpp -o zkbpp/generated
+# Then run the script compile_circuit in the zkbpp directory to compile the generated C++ circuit.
+# Then run this script (prove_and_verify) in the zkbpp directory to prove and verify the generated C++ circuit.
+
+if [ -z "$1" ]; then
+    echo "Usage:"
+    echo "Prove: $0 1"
+    echo "Verify: $0 2"
+    echo "Prove and verify: $0 3"
+    exit 1
+fi
+
+PRIME="`cat "generated_prime.txt"`"
+if [ -z "$PRIME" ]; then
+    echo "PRIME not specified: maybe the relation does not use any wires"
+    exit 1
+fi
+TYPE="`cat "generated_type.txt"`"
+if [ -z "$TYPE" ]; then
+    echo "TYPE not specified: maybe the relation does not use any wires"
+    exit 1
+fi
+
+if [ "$1" -ne 2 ]; then
+    cp generated_witness.txt modified-zkbpp/code/ || exit 1
+fi
+
+cp generated_instance.txt modified-zkbpp/code/ &&
+cd modified-zkbpp/code &&
+/usr/bin/time -v ./zkbpp_test "$PRIME" 1 "$TYPE" 1 1 "$1"
+RETVAL="$?"
+if [ "$RETVAL" -eq 0 ]; then
+    echo "Result: SUCCESS"
+elif [ "$RETVAL" -eq 2 ]; then
+    echo "Result: proof verification FAILED"
+else
+    echo "Result: ERROR OCCURRED, code $RETVAL"
+fi
+exit "$RETVAL"

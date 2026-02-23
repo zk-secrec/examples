@@ -1,0 +1,189 @@
+/*
+ * Copyright 2026 Cybernetica AS
+ *
+ * Redistribution and use in source and binary forms, with or without modification, are permitted provided that the following conditions are met:
+ * 1. Redistributions of source code must retain the above copyright notice, this list of conditions and the following disclaimer.
+ * 2. Redistributions in binary form must reproduce the above copyright notice, this list of conditions and the following disclaimer in the documentation and/or other materials provided with the distribution.
+ * 3. Neither the name of the copyright holder nor the names of its contributors may be used to endorse or promote products derived from this software without specific prior written permission.
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS “AS IS” AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ */
+ 
+// 384-bit ECDSA:
+// ./runrust zkbpp/zk-anon-auth/zk-anon-auth.zksc -p zkbpp/zk-anon-auth/zk-anon-auth_public.json -i zkbpp/zk-anon-auth/zk-anon-auth_instance.json -w zkbpp/zk-anon-auth/zk-anon-auth_witness.json -e zkbpp/zk-anon-auth/zk-anon-auth.rs -c zkbpp/zkbpp.ccc --zkbpp -o zkbpp/generated
+// ./runrust zkbpp/zk-anon-auth/zk-anon-auth.zksc -p zkbpp/zk-anon-auth/zk-anon-auth_public.json -i zkbpp/zk-anon-auth/zk-anon-auth_instance.json -e zkbpp/zk-anon-auth/zk-anon-auth.rs -c zkbpp/zkbpp.ccc --zkbpp -o zkbpp/generated-verifier --verifier
+
+// 256-bit ECDSA:
+// ./runrust zkbpp/zk-anon-auth/zk-anon-auth.zksc -p zkbpp/zk-anon-auth/zk-anon-auth256_public.json -i zkbpp/zk-anon-auth/zk-anon-auth256_instance.json -w zkbpp/zk-anon-auth/zk-anon-auth256_witness.json -e zkbpp/zk-anon-auth/zk-anon-auth.rs -c zkbpp/zkbpp.ccc --zkbpp -o zkbpp/generated
+// ./runrust zkbpp/zk-anon-auth/zk-anon-auth.zksc -p zkbpp/zk-anon-auth/zk-anon-auth256_public.json -i zkbpp/zk-anon-auth/zk-anon-auth256_instance.json -e zkbpp/zk-anon-auth/zk-anon-auth.rs -c zkbpp/zkbpp.ccc --zkbpp -o zkbpp/generated-verifier --verifier
+
+use Std::*;
+use Integer::*;
+use Common::*;
+use Base64::*;
+use Parsing::*;
+use Sha256Post::*;
+use sig::*;
+//use PoseidonHashing::*;
+
+// 384-bit ECDSA:
+//type P : Nat = P384;
+//type Q : Nat = Q384;
+//type Bitwise : Ring = bitwise[384];
+
+// 256-bit ECDSA:
+type P : Nat = P256;
+type Q : Nat = Q256;
+type Bitwise : Ring = bitwise[256];
+
+fn main()
+    where
+        //Field[PoseidonN],
+        //PostConvertible[bitwise[56],bitwise[61]],
+        //PostConvertible[bitwise[61],bitwise[64]],
+        //PostConvertible[bitwise[61],plain[PoseidonN]],
+        //PostConvertible[plain[PoseidonN],bitwise[61]],
+        Field[P],
+        Field[Q],
+        PostRing[bitwise[8]],
+        PostRing[bitwise[32]],
+        PostRing[bitwise[64]],
+        PostRing[bitwise[256]],
+        PostConvertible[plain[Q],Bitwise],
+        PostConvertible[Bitwise,plain[P]],
+        PostConvertible[Bitwise,plain[Q]],
+        PostConvertible[bitwise[8],bitwise[32]],
+        PostConvertible[bitwise[32],bitwise[8]],
+        PostConvertible[bitwise[8],bitwise[64]],
+        PostConvertible[bitwise[64],bitwise[8]],
+        PostConvertible[bitwise[32],bitwise[64]],
+        PostConvertible[bitwise[64],bitwise[32]],
+        PostConvertible[bitwise[32],Bitwise],
+        Vectorization
+{
+    // lengths
+    let salt_len : u64 $pre @public = get_public("salt_len");
+    let T_len : u64 $pre @public = get_public("T_len");
+    let vk_u_len : u64 $pre @public = get_public("vk_u_len");
+    let r_len : u64 $pre @public = get_public("r_len");
+    let header_base64_len : u64 $pre @public = get_public("header_base64_len");
+    let max_payload_len : u64 $pre @public = get_public("max_payload_len");
+    let max_stid_len : u64 $pre @public = get_public("max_stid_len");
+    let max_aud_len : u64 $pre @public = get_public("max_aud_len");
+    let max_iss_len : u64 $pre @public = get_public("max_iss_len");
+
+    let sha256_len : u64 $pre @public = 32;
+    let sha256_base64_len : u64 $pre @public = 43;
+
+    // initialize SHA-256
+    let dummy : int[bitwise[256]] $post @prover = wire { 0 };
+    let sha256_h_init : BitMatrixPost = get_h_init();
+    let sha256_k0 = get_round_k_transposed();
+    let sha256_k = for i in 0 .. length(sha256_k0) {
+        (wire { sha256_k0[i] as int[bitwise[64]] }) as @prover
+    };
+    let mut axc = add_xor_checker_new();
+
+    // extract JSON fields from payload
+    let payload_pre : list[u8 $pre @prover] $pre @prover = get_witness("payload");
+    dbg_print("payload length: " ++ to_string(length(payload_pre)));
+    dbg_assert(length(payload_pre) <= max_payload_len as @prover);
+    let payload : arr[int[bitwise[8]] $post @prover] =
+        array_to_post(
+            freeze(
+                for i in 0 .. max_payload_len {
+                    if (i as @prover < length(payload_pre)) {
+                        payload_pre[i as @prover] as int[bitwise[8]]
+                    } else {
+                        //0 // Add zeros to make the length equal to the public upper bound
+                        32
+                    }
+                }));
+    print_as_string(for i in 0 .. length(payload) { payload[i] as $pre as u8 });
+    let max_longest_extracted_field_len = max_pre(max_pre(max_stid_len, max_aud_len), max_pre(max_iss_len, sha256_base64_len));
+    let padded_payload = concat_vec(payload, array_to_prover_bitwise(array_to_post(freeze([0 : int[bitwise[8]] $pre @public; max_longest_extracted_field_len])))); // Add as many zeros as the maximum length of the longest extracted field
+    let json_stid = extract_json_field("stid", padded_payload, max_stid_len);
+    print_as_string(for i in 0 .. length(json_stid) { json_stid[i] as $pre as u8 });
+    let json_aud = extract_json_field("aud", padded_payload, max_aud_len);
+    print_as_string(for i in 0 .. length(json_aud) { json_aud[i] as $pre as u8 });
+    let json_iss = extract_json_field("iss", padded_payload, max_iss_len);
+    print_as_string(for i in 0 .. length(json_iss) { json_iss[i] as $pre as u8 });
+    let json_nonce = extract_json_field("nonce", padded_payload, sha256_base64_len);
+    print_as_string(for i in 0 .. length(json_nonce) { json_nonce[i] as $pre as u8 });
+
+    // check that jwt.iss = iss
+    let inst_iss_pre : list[u8 $pre @verifier] $pre @verifier = get_instance("iss");
+    let inst_iss : arr[int[bitwise[8]] $post @verifier] =
+        array_to_post(
+            freeze(
+                for i in 0 .. max_iss_len {
+                    if (i as @verifier < length(inst_iss_pre)) {
+                        inst_iss_pre[i as @verifier] as int[bitwise[8]]
+                    } else {
+                        0 // Add zeros to make the length equal to the public upper bound
+                    }
+                }));
+    for i in 0 .. max_iss_len {
+        assert_zero(json_iss[i] - inst_iss[i] as @prover);
+    }
+
+    // check that zkaddr = H(jwt.stid, jwt.aud, jwt.iss, salt)
+    let salt_pre : list[u8 $pre @prover] $pre @prover = get_witness("salt");
+    let salt = array_to_post(freeze(for i in 0 .. salt_len { salt_pre[i as @prover] as int[bitwise[8]] }));
+    let zkaddr_hash_arg = concat_vec(concat_vec(json_stid, json_aud), concat_vec(json_iss, salt));
+    dbg_print("zkaddr_hash_arg length: " ++ to_string(length(zkaddr_hash_arg)));
+    // Poseidon is 5-6 times slower here than SHA-256
+    //let poseidon_params : PoseidonParams[PoseidonN, $post, @public] = read_poseidon_params();
+    //let zkaddr_hash_poseidon = base64(poseidon_hash_8bit(poseidon_params, zkaddr_hash_arg));
+    //dbg_print("zkaddr_hash_poseidon length: " ++ to_string(length(zkaddr_hash_poseidon)));
+    //print_as_string(for i in 0 .. length(zkaddr_hash_poseidon) { zkaddr_hash_poseidon[i] as $pre as u8 });
+    let zkaddr_hash = base64(bitwise_vec_to_bitwise_vec(freeze(sha256(ref axc, sha256_k, sha256_h_init, zkaddr_hash_arg))));
+    dbg_print(to_string(length(zkaddr_hash)));
+    print_8bit_arr("zkaddr_hash", zkaddr_hash);
+    let inst_zkaddr_pre : list[u8 $pre @verifier] $pre @verifier = get_instance("zkaddr");
+    let inst_zkaddr : arr[int[bitwise[8]] $post @verifier] =
+        array_to_post(freeze(for i in 0 .. sha256_base64_len { inst_zkaddr_pre[i as @verifier] as int[bitwise[8]] }));
+    for i in 0 .. sha256_base64_len {
+        assert_zero(inst_zkaddr[i] as @prover - zkaddr_hash[i]);
+    }
+
+    // check that jwt.nonce = H(vk_u, T, r)
+    let inst_T_pre : list[u8 $pre @verifier] $pre @verifier = get_instance("T");
+    let inst_T : arr[int[bitwise[8]] $post @prover] =
+        array_to_prover_bitwise(array_to_post(freeze(for i in 0 .. T_len { inst_T_pre[i as @verifier] as int[bitwise[8]] })));
+    let inst_vk_u_pre : list[u8 $pre @verifier] $pre @verifier = get_instance("vk_u");
+    let inst_vk_u : arr[int[bitwise[8]] $post @prover] =
+        array_to_prover_bitwise(array_to_post(freeze(for i in 0 .. vk_u_len { inst_vk_u_pre[i as @verifier] as int[bitwise[8]] })));
+    let witn_r_pre : list[u8 $pre @prover] $pre @prover = get_witness("r");
+    let witn_r : arr[int[bitwise[8]] $post @prover] =
+        array_to_post(freeze(for i in 0 .. r_len { witn_r_pre[i as @prover] as int[bitwise[8]] }));
+    let nonce_hash_arg = concat_vec(inst_vk_u, concat_vec(inst_T, witn_r));
+    dbg_print("nonce_hash_arg length: " ++ to_string(length(nonce_hash_arg)));
+    let nonce_hash = base64(bitwise_vec_to_bitwise_vec(freeze(sha256(ref axc, sha256_k, sha256_h_init, nonce_hash_arg))));
+    print_8bit_arr("nonce_hash", nonce_hash);
+    print_as_string(for i in 0 .. length(nonce_hash) { nonce_hash[i] as $pre as u8 });
+    for i in 0 .. sha256_base64_len {
+        assert_zero(json_nonce[i] - nonce_hash[i]);
+    }
+
+    // check the signature
+    let header_base64_pre : list[u8 $pre @verifier] $pre @verifier = get_instance("header_base64");
+    let header_base64 : arr[int[bitwise[8]] $post @prover] =
+        array_to_prover_bitwise(array_to_post(freeze(
+            for i in 0 .. header_base64_len + 1 {
+                if (i < header_base64_len) {
+                    header_base64_pre[i as @verifier] as int[bitwise[8]]
+                } else {
+                    46 // '.'
+                }
+            })));
+    let payload_base64 : list[int[bitwise[8]] $post @prover] = base64(payload);
+    let sig_hash_arg = concat_vec(header_base64, freeze(payload_base64));
+    print_as_string(for i in 0 .. length(sig_hash_arg) { sig_hash_arg[i] as $pre as u8 });
+    let h_out = sha256(ref axc, sha256_k, sha256_h_init, sig_hash_arg);
+	let signature_pre : tuple[uint[Q] $pre @prover, uint[Q] $pre @prover] = get_witness("signature");
+	let pubkey_pre : tuple[uint[P] $pre @verifier, uint[P] $pre @verifier] = get_instance("pubkey");
+	let signature : tuple[uint[Q] $post @prover, uint[Q] $post @prover] = ( wire { signature_pre.0 }, wire { signature_pre.1 } );
+	assert_checksig::[Bitwise](h_out, pubkey_pre, signature);
+
+    {}
+}

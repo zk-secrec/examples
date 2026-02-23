@@ -1,0 +1,246 @@
+/*
+ * Copyright 2026 Cybernetica AS
+ *
+ * Redistribution and use in source and binary forms, with or without modification, are permitted provided that the following conditions are met:
+ * 1. Redistributions of source code must retain the above copyright notice, this list of conditions and the following disclaimer.
+ * 2. Redistributions in binary form must reproduce the above copyright notice, this list of conditions and the following disclaimer in the documentation and/or other materials provided with the distribution.
+ * 3. Neither the name of the copyright holder nor the names of its contributors may be used to endorse or promote products derived from this software without specific prior written permission.
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS “AS IS” AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ */
+ 
+use Std::*;
+
+type bitwise_u64 : Unqualified = int[bitwise[64]];
+
+type bitwise_u32 : Unqualified = int[bitwise[32]];
+
+type BitMatrixPre : Unqualified = list[bitwise_u32 $pre @prover]; // 64 rows of 32 bits each
+type TransposedBitMatrixPre : Unqualified = list[bitwise_u64 $pre @prover]; // 32 rows of 64 bits each, but operations (e.g. rightrotate_tbm_pre) are on 64 columns in parallel, not 32 rows in parallel
+
+fn rightrotate_tbm_pre(x : TransposedBitMatrixPre, n : u64 $pre @public) -> TransposedBitMatrixPre {
+    let len = length(x);
+    for i in 0 .. len {
+        x[(i + n) % len]
+    }
+}
+
+fn rightshift_tbm_pre(x : TransposedBitMatrixPre, n : u64 $pre @public) -> TransposedBitMatrixPre {
+    let len = length(x);
+    for i in 0 .. len {
+        if (i + n < len) {
+            x[i + n]
+        } else {
+            0
+        }
+    }
+}
+
+fn addXor_tbm_pre(x : TransposedBitMatrixPre, y : TransposedBitMatrixPre) -> TransposedBitMatrixPre {
+    //let mut c : bitwise_u64 $pre @prover = 0;
+    //for i in 0 .. length(x) {
+    //    let s_i = x[i] + y[i] + c;
+    //    if (i + 1 < length(x)) {
+    //        c = (x[i] + c) * (y[i] + c) + c;
+    //    }
+    //    s_i
+    //}
+    let rec c : list[bitwise_u64 $pre @prover] =
+        for i in 0 .. length(x) {
+            if (i == 0) {
+                0
+            } else {
+                (x[i-1] + c[i-1]) * (y[i-1] + c[i-1]) + c[i-1]
+            }
+        };
+    for i in 0 .. length(x) {
+        x[i] + y[i] + c[i]
+    }
+}
+
+fn to_previous_round_tbm_pre(x : TransposedBitMatrixPre, n : u64 $pre @public) -> TransposedBitMatrixPre {
+    for i in 0 .. length(x) {
+        shrc_pre(x[i], n)
+    }
+}
+
+fn to_next_round_tbm_pre(x : TransposedBitMatrixPre, n : u64 $pre @public) -> TransposedBitMatrixPre {
+    for i in 0 .. length(x) {
+        shlc_pre(x[i], n)
+    }
+}
+
+fn from_initial_and_previous_round_tbm_pre(initial_value : bitwise_u32 $pre @prover, x : TransposedBitMatrixPre) -> TransposedBitMatrixPre {
+    //let mut t = initial_value as bitwise_u64;
+    //for i in 0 .. length(x) {
+    //    let y = shlc_pre(x[i], 1) + t * 1;
+    //    t = shrc_pre(t, 1);
+    //    y
+    //}
+    let rec t =
+        for i in 0 .. length(x) {
+            if (i == 0) {
+                initial_value as bitwise_u64
+            } else {
+                shrc_pre(t[i-1], 1)
+            }
+        };
+    for i in 0 .. length(x) {
+        shlc_pre(x[i], 1) + t[i] * 1
+    }
+}
+
+fn extract_last_round_tbm_pre(x : TransposedBitMatrixPre) -> bitwise_u32 $pre @prover {
+    //let mut t : bitwise_u64 $pre @prover = 0;
+    //for i in 0 .. length(x) {
+    //    t = t + shlc_pre(shrc_pre(x[i], 63), i);
+    //}
+    //t as bitwise_u32
+    let rec t =
+        for i in 0 .. length(x) {
+            let t0 =
+                if (i > 0) {
+                    t[i-1]
+                } else {
+                    0
+                };
+            t0 + shlc_pre(shrc_pre(x[i], 63), i)
+        };
+    t[length(x) - 1] as bitwise_u32
+}
+
+fn not_tbm_pre(x : TransposedBitMatrixPre) -> TransposedBitMatrixPre {
+    for i in 0 .. length(x) {
+        x[i] + 0xffffffffffffffff
+    }
+}
+
+fn xor_tbm_pre(x : TransposedBitMatrixPre, y : TransposedBitMatrixPre) -> TransposedBitMatrixPre {
+    for i in 0 .. length(x) {
+        x[i] + y[i]
+    }
+}
+
+fn and_tbm_pre(x : TransposedBitMatrixPre, y : TransposedBitMatrixPre) -> TransposedBitMatrixPre {
+    for i in 0 .. length(x) {
+        x[i] * y[i]
+    }
+}
+
+fn assert_eq_tbm_pre(x : TransposedBitMatrixPre, y : TransposedBitMatrixPre) {
+    for i in 0 .. length(x) {
+        dbg_assert_eq(x[i], y[i]);
+    }
+    {}
+}
+
+extern fn shrc_pre[R : Ring](x : int[R] $pre @prover, n : u64 $pre @public) -> int[R] $pre @prover;
+extern fn shlc_pre[R : Ring](x : int[R] $pre @prover, n : u64 $pre @public) -> int[R] $pre @prover;
+extern fn transpose_bit_matrix_uint_pre(x : list[uint $pre @prover], n : u64 $pre @public) -> list[uint $pre @prover]; // use the lowest n bits of each x[i], the output has n elements
+extern fn sha256_block_compute_witness_u32(h_init : list[u32 $pre @prover], msg_block : list[u32 $pre @prover]) -> tuple[list[u64 $pre @prover], list[u64 $pre @prover], list[u64 $pre @prover]];
+extern fn get_round_k_transposed() -> list[u64 $pre @public];
+
+fn transpose_bit_matrix_pre(x : list[bitwise_u32 $pre @prover], n : u64 $pre @public) -> list[bitwise_u64 $pre @prover] {
+    let x2 = for i in 0 .. length(x) {
+        x[i] as uint
+    };
+    let x3 = transpose_bit_matrix_uint_pre(x2, n);
+    for i in 0 .. length(x3) {
+        x3[i] as bitwise_u64
+    }
+}
+
+fn sha256_block_compute_witness(h_init : BitMatrixPre, msg_block : BitMatrixPre) -> tuple[TransposedBitMatrixPre, TransposedBitMatrixPre, TransposedBitMatrixPre] {
+    let h_init2 : list[u32 $pre @prover] = for i in 0 .. length(h_init) {
+        h_init[i] as u32
+    };
+    let msg_block2 : list[u32 $pre @prover] = for i in 0 .. length(msg_block) {
+        msg_block[i] as u32
+    };
+    let res = sha256_block_compute_witness_u32(h_init2, msg_block2);
+    let w = for i in 0 .. length(res.0) {
+        res.0[i] as bitwise_u64
+    };
+    let a = for i in 0 .. length(res.1) {
+        res.1[i] as bitwise_u64
+    };
+    let e = for i in 0 .. length(res.2) {
+        res.2[i] as bitwise_u64
+    };
+    (w, a, e)
+}
+
+// w, a, e are witness bit matrices computed by prover locally
+// k is the transposed round constant matrix
+fn check_sha256_block_pre(h_init : BitMatrixPre, msg_block : BitMatrixPre, k : TransposedBitMatrixPre, w : TransposedBitMatrixPre, a : TransposedBitMatrixPre, e : TransposedBitMatrixPre) -> BitMatrixPre {
+    dbg_assert(length(h_init) == 8);
+    dbg_assert(length(msg_block) == 16);
+    dbg_assert(length(k) == 32);
+    dbg_assert(length(w) == 32);
+    dbg_assert(length(a) == 32);
+    dbg_assert(length(e) == 32);
+
+    let w0 : TransposedBitMatrixPre = transpose_bit_matrix_pre(msg_block, 32);
+    for i in 0 .. length(w) {
+        dbg_assert_eq(w[i] * 0xffff, w0[i]);
+    }
+
+    let w_2 : TransposedBitMatrixPre = to_next_round_tbm_pre(w, 2);
+    let w_7 : TransposedBitMatrixPre = to_next_round_tbm_pre(w, 7);
+    let w_15 : TransposedBitMatrixPre = to_next_round_tbm_pre(w, 15);
+    let w_16 : TransposedBitMatrixPre = to_next_round_tbm_pre(w, 16);
+    let s0 : TransposedBitMatrixPre = xor_tbm_pre(rightrotate_tbm_pre(w_15, 7), xor_tbm_pre(rightrotate_tbm_pre(w_15, 18), rightshift_tbm_pre(w_15, 3)));
+    let s1 : TransposedBitMatrixPre = xor_tbm_pre(rightrotate_tbm_pre(w_2, 17), xor_tbm_pre(rightrotate_tbm_pre(w_2, 19), rightshift_tbm_pre(w_2, 10)));
+    assert_eq_tbm_pre(to_previous_round_tbm_pre(w, 16), to_previous_round_tbm_pre(addXor_tbm_pre(addXor_tbm_pre(w_16, s0), addXor_tbm_pre(w_7, s1)), 16));
+
+    // jth bit of b[i] is the ith bit of b in jth round
+    let b : TransposedBitMatrixPre = from_initial_and_previous_round_tbm_pre(h_init[1], a);
+    let c : TransposedBitMatrixPre = from_initial_and_previous_round_tbm_pre(h_init[2], b);
+    let d : TransposedBitMatrixPre = from_initial_and_previous_round_tbm_pre(h_init[3], c);
+    let f : TransposedBitMatrixPre = from_initial_and_previous_round_tbm_pre(h_init[5], e);
+    let g : TransposedBitMatrixPre = from_initial_and_previous_round_tbm_pre(h_init[6], f);
+    let h : TransposedBitMatrixPre = from_initial_and_previous_round_tbm_pre(h_init[7], g);
+    let S1 : TransposedBitMatrixPre = xor_tbm_pre(rightrotate_tbm_pre(e, 6), xor_tbm_pre(rightrotate_tbm_pre(e, 11), rightrotate_tbm_pre(e, 25)));
+    let ch : TransposedBitMatrixPre = xor_tbm_pre(and_tbm_pre(e, f), and_tbm_pre(not_tbm_pre(e), g));
+    let temp1 : TransposedBitMatrixPre = addXor_tbm_pre(h, addXor_tbm_pre(S1, addXor_tbm_pre(ch, addXor_tbm_pre(k, w))));
+    let S0 : TransposedBitMatrixPre = xor_tbm_pre(rightrotate_tbm_pre(a, 2), xor_tbm_pre(rightrotate_tbm_pre(a, 13), rightrotate_tbm_pre(a, 22)));
+    let maj : TransposedBitMatrixPre = xor_tbm_pre(and_tbm_pre(a, b), xor_tbm_pre(and_tbm_pre(a, c), and_tbm_pre(b, c)));
+    let temp2 : TransposedBitMatrixPre = addXor_tbm_pre(S0, maj);
+    let e_next : TransposedBitMatrixPre = addXor_tbm_pre(d, temp1);
+    let a_next : TransposedBitMatrixPre = addXor_tbm_pre(temp1, temp2);
+    assert_eq_tbm_pre(a, from_initial_and_previous_round_tbm_pre(h_init[0], a_next));
+    assert_eq_tbm_pre(e, from_initial_and_previous_round_tbm_pre(h_init[4], e_next));
+
+    [
+        extract_last_round_tbm_pre(a_next),
+        extract_last_round_tbm_pre(a),
+        extract_last_round_tbm_pre(b),
+        extract_last_round_tbm_pre(c),
+        extract_last_round_tbm_pre(e_next),
+        extract_last_round_tbm_pre(e),
+        extract_last_round_tbm_pre(f),
+        extract_last_round_tbm_pre(g)
+    ]
+}
+
+fn sha256_block_pre(k : TransposedBitMatrixPre, h_init : BitMatrixPre, msg_block : BitMatrixPre) -> BitMatrixPre {
+    let witn = sha256_block_compute_witness(h_init, msg_block);
+    let a_to_h_out = check_sha256_block_pre(h_init, msg_block, k, witn.0, witn.1, witn.2);
+    let h_out = for i in 0 .. length(h_init) {
+        ((h_init[i] as u32) + (a_to_h_out[i] as u32)) as bitwise_u32 // TODO: this would be very inefficient in $post
+    };
+    h_out
+}
+
+fn main() {
+    let h_init : BitMatrixPre = [0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19];
+    let msg_block : BitMatrixPre = [0x80000000, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    let k0 = get_round_k_transposed();
+    let k = for i in 0 .. length(k0) {
+        k0[i] as bitwise_u64 as @prover
+    };
+    let h_out = sha256_block_pre(k, h_init, msg_block);
+    for i in 0 .. length(h_out) {
+        dbg_print(to_string(h_out[i]));
+    }
+    {}
+}

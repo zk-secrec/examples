@@ -1,0 +1,12 @@
+#!/bin/bash
+# First run runrust in the compiler directory with the options -c zkbpp/zkbpp.ccc --zkbpp -o zkbpp/generated, e.g.
+#   ./runrust FILENAME.zksc -c zkbpp/zkbpp.ccc --zkbpp -o zkbpp/generated
+# Then run this script (compile_circuit) in the zkbpp directory to compile the generated C++ circuit.
+# Then run the script prove_and_verify in the zkbpp directory to prove and verify the generated C++ circuit.
+
+cp generated_header.h modified-zkbpp/code/
+cat header_for_generated_direct.h generated_direct.cpp > modified-zkbpp/code/generated_direct.cpp
+cat header_for_generated.h generated.cpp > modified-zkbpp/code/generated.cpp
+
+cd modified-zkbpp/code &&
+/usr/bin/time -v ./_compile_zkbpp.sh

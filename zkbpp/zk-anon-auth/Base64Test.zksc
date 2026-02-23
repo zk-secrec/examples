@@ -1,0 +1,40 @@
+// ./runrust zkbpp/zk-anon-auth/Base64Test.zksc -w zkbpp/zk-anon-auth/Base64_witness.json -e zkbpp/zk-anon-auth/zk-anon-auth.rs -c zkbpp/zkbpp.ccc --zkbpp -o zkbpp/generated
+// ./runrust zkbpp/zk-anon-auth/Base64Test.zksc -e zkbpp/zk-anon-auth/zk-anon-auth.rs -c zkbpp/zkbpp.ccc --zkbpp -o zkbpp/generated-verifier --verifier
+/*
+ * Copyright 2026 Cybernetica AS
+ *
+ * Redistribution and use in source and binary forms, with or without modification, are permitted provided that the following conditions are met:
+ * 1. Redistributions of source code must retain the above copyright notice, this list of conditions and the following disclaimer.
+ * 2. Redistributions in binary form must reproduce the above copyright notice, this list of conditions and the following disclaimer in the documentation and/or other materials provided with the distribution.
+ * 3. Neither the name of the copyright holder nor the names of its contributors may be used to endorse or promote products derived from this software without specific prior written permission.
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS “AS IS” AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ */
+
+use Std::*;
+use Base64::*;
+use Common::*;
+
+fn main()
+    where
+        PostRing[bitwise[8]],
+        PostRing[bitwise[64]],
+        Vectorization
+{
+    let dummy : int[bitwise[64]] $post @prover = wire { 0 };
+
+    let msg_pre : list[u8 $pre @prover] $pre @prover = get_witness("msg");
+    dbg_print(to_string(length(msg_pre)));
+    let msg : list[int[bitwise[8]] $post @prover] = for i in 0 .. 33 * 45 { wire { msg_pre[i as @prover] as int[bitwise[8]] } };
+    let out = base64(msg);
+    print_as_string(for i in 0 .. length(out) { out[i] as $pre as u8 });
+
+    let expected_base64_pre : list[u8 $pre @prover] $pre @prover = get_witness("expected_base64");
+    dbg_print(to_string(length(expected_base64_pre)));
+    let expected_base64 : list[int[bitwise[8]] $post @prover] = for i in 0 .. 44 * 45 { wire { expected_base64_pre[i as @prover] as int[bitwise[8]] } };
+
+    dbg_assert(length(out) == length(expected_base64));
+    for i in 0 .. length(out) {
+        assert_zero(out[i] - expected_base64[i]);
+    }
+    {}
+}

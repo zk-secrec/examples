@@ -1,0 +1,126 @@
+/*
+ * Copyright 2026 Cybernetica AS
+ *
+ * Redistribution and use in source and binary forms, with or without modification, are permitted provided that the following conditions are met:
+ * 1. Redistributions of source code must retain the above copyright notice, this list of conditions and the following disclaimer.
+ * 2. Redistributions in binary form must reproduce the above copyright notice, this list of conditions and the following disclaimer in the documentation and/or other materials provided with the distribution.
+ * 3. Neither the name of the copyright holder nor the names of its contributors may be used to endorse or promote products derived from this software without specific prior written permission.
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS “AS IS” AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ */
+ 
+use Std::*;
+
+pub extern fn shrc_pre[@D, R : Ring](x : int[R] $pre @D, n : u64 $pre @public) -> int[R] $pre @D;
+pub extern fn shlc_pre[@D, R : Ring](x : int[R] $pre @D, n : u64 $pre @public) -> int[R] $pre @D;
+pub extern fn shrc_post[R : Ring](x : int[R] $post @prover, n : u64 $pre @public) -> int[R] $post @prover;
+pub extern fn shlc_post[R : Ring](x : int[R] $post @prover, n : u64 $pre @public) -> int[R] $post @prover;
+pub extern fn bitwise_vec_to_bitwise_vec[R1 : Ring, R2 : Ring](x : arr[int[R1] $post @prover]) -> arr[int[R2] $post @prover];
+pub extern fn transpose_bit_matrix_post[R1 : Ring, R2 : Ring](nr : u64 $pre @public, nc : u64 $pre @public, x : arr[int[R1] $post @prover]) -> arr[int[R2] $post @prover];
+pub extern fn concat_vec[R : Ring](x : arr[int[R] $post @prover], y : arr[int[R] $post @prover]) -> arr[int[R] $post @prover];
+pub extern fn print_as_string(x : list[u8 $pre @prover]);
+pub extern fn string_to_list(s : string $pre @public) -> list[u8 $pre @public];
+pub extern fn array_to_prover_bitwise[@D, N : Nat](x : arr[int[bitwise[N]] $post @D]) -> arr[int[bitwise[N]] $post @prover];
+
+pub fn addXor_tbm_post(x : list[int[bitwise[64]] $post @prover], y : list[int[bitwise[64]] $post @prover]) -> list[int[bitwise[64]] $post @prover] {
+    let mut c : int[bitwise[64]] $post @prover = 0;
+    for i in 0 .. length(x) {
+        let s_i = x[i] + y[i] + c;
+        if (i + 1 < length(x)) {
+            c = (x[i] + c) * (y[i] + c) + c;
+        }
+        s_i
+    }
+    //let rec c : list[int[bitwise[64]] $post @prover] =
+    //    for i in 0 .. length(x) {
+    //        if (i == 0) {
+    //            0
+    //        } else {
+    //            (x[i-1] + c[i-1]) * (y[i-1] + c[i-1]) + c[i-1]
+    //        }
+    //    };
+    //for i in 0 .. length(x) {
+    //    x[i] + y[i] + c[i]
+    //}
+}
+
+pub struct AddXorChecker {
+    x : list[int[bitwise[32]] $post @prover],
+    y : list[int[bitwise[32]] $post @prover],
+    z : list[int[bitwise[32]] $post @prover]
+}
+
+// check that x[i] + y[i] = z[i] for all i in 0 .. n, where + is addition, not bitwise xor 
+fn check_add_xor_batch(n : u64 $pre @public, x : list[int[bitwise[32]] $post @prover], y : list[int[bitwise[32]] $post @prover], z : list[int[bitwise[32]] $post @prover])
+    where
+        PostRing[bitwise[64]],
+        Vectorization
+{
+    dbg_assert(n <= 64);
+    let x : arr[int[bitwise[64]] $post @prover] = transpose_bit_matrix_post(n, 32, freeze(x));
+    let y : arr[int[bitwise[64]] $post @prover] = transpose_bit_matrix_post(n, 32, freeze(y));
+    let z : arr[int[bitwise[64]] $post @prover] = transpose_bit_matrix_post(n, 32, freeze(z));
+    let z2 = addXor_tbm_post(thaw(x), thaw(y));
+    for i in 0 .. length(z) {
+        assert_zero(z[i] + z2[i]);
+    }
+    {}
+}
+
+impl AddXorChecker {
+    fn finalize(axc : AddXorChecker)
+        where
+            PostRing[bitwise[64]],
+            Vectorization
+    {
+        let n = length(axc.x);
+        dbg_print("Finalizing AddXorChecker with " ++ (to_string(n) ++ " additions"));
+        let k = n / 64;
+        for i in 0 .. k {
+            let i1 = i * 64;
+            let i2 = i1 + 64;
+            check_add_xor_batch(64, axc.x[i1 .. i2], axc.y[i1 .. i2], axc.z[i1 .. i2]);
+        }
+        let i1 = k * 64;
+        if (n > i1) {
+            check_add_xor_batch(n - i1, axc.x[i1 ..], axc.y[i1 ..], axc.z[i1 ..]);
+        }
+    }
+}
+
+pub fn add_xor_checker_new() -> AddXorChecker {
+    AddXorChecker {
+        x : [],
+        y : [],
+        z : []
+    }
+}
+
+pub fn add_xor(ref axc : AddXorChecker, x : int[bitwise[32]] $post @prover, y : int[bitwise[32]] $post @prover) -> int[bitwise[32]] $post @prover
+    where
+        PostRing[bitwise[32]]
+{
+    let z = wire { (x as $pre as u32 + y as $pre as u32) as int[bitwise[32]] };
+    list_push(ref axc.x, x);
+    list_push(ref axc.y, y);
+    list_push(ref axc.z, z);
+    z
+}
+
+pub fn string_to_list_bitwise(s : string $pre @public) -> list[int[bitwise[8]] $pre @public] {
+    let s = string_to_list(s);
+    for i in 0 .. length(s) {
+        s[i] as int[bitwise[8]]
+    }
+}
+
+pub fn print_8bit_arr(s : string $pre @prover, x : list[int[bitwise[8]] $post @prover]) {
+    let mut s : string $pre @prover = s ++ ": [";
+    for i in 0 .. length(x) {
+        if (i > 0) {
+            s = s ++ ","
+        }
+        s = (s ++ "\"") ++ (to_string(x[i] as $pre) ++ "\"");
+    }
+    s = s ++ "]";
+    dbg_print(s);
+}

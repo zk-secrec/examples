@@ -1,0 +1,196 @@
+/*
+ * Copyright 2026 Cybernetica AS
+ *
+ * Redistribution and use in source and binary forms, with or without modification, are permitted provided that the following conditions are met:
+ * 1. Redistributions of source code must retain the above copyright notice, this list of conditions and the following disclaimer.
+ * 2. Redistributions in binary form must reproduce the above copyright notice, this list of conditions and the following disclaimer in the documentation and/or other materials provided with the distribution.
+ * 3. Neither the name of the copyright holder nor the names of its contributors may be used to endorse or promote products derived from this software without specific prior written permission.
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS “AS IS” AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ */
+
+use Std::*;
+use Common::*;
+
+pub fn slice_by_prover_index(x : arr[int[bitwise[8]] $post @prover], start : u64 $pre @prover, len : u64 $pre @public) -> arr[int[bitwise[8]] $post @prover]
+    where
+        PostRing[bitwise[64]],
+        PostConvertible[bitwise[8],bitwise[64]],
+        PostConvertible[bitwise[64],bitwise[8]],
+        Vectorization
+{
+    let xlen = length(x);
+    dbg_print(("slice_by_prover_index " ++ to_string(xlen as @prover)) ++ ((" " ++ to_string(len as @prover)) ++ (" " ++ to_string(start))));
+    if (xlen > len) {
+        // Divide x into two halves of length new_xlen with overlap len - 1 or len bytes
+        // 1st half has indices 0 .. (new_xlen - 1) (inclusive)
+        // 2nd half has indices (xlen - new_xlen) .. (xlen - 1) (inclusive)
+        // new_xlen - len == (xlen - len) / 2 (division rounding down)
+        // Each iteration divides xlen - len by 2, after log2(xlen - len) iterations xlen == len and the recursion terminates
+        // Complexity of the current iteration is O(xlen) = O((xlen - len) + len)
+        // Total complexity of all iterations from the current onwards is O((xlen - len) + len * log(xlen - len))
+        let new_xlen = (xlen + len) / 2;
+        let start2 = xlen - new_xlen; // start index of the 2nd half
+        let is_2nd_bool : b64 $pre @prover = start >= start2 as @prover;
+        let is_2nd_pre : u64 $pre @prover = -(is_2nd_bool as u64);
+        let is_2nd : int[bitwise[64]] $post @prover = wire { is_2nd_pre as int[bitwise[64]] };
+        // is_2nd is all bits one if we choose the 2nd half and all bits zero if we choose the 1st half
+        // assert that is_2nd has all bits zero or all bits one
+        assert_zero(is_2nd * 0x7fffffffffffffff + shrc_post(is_2nd, 1));
+        let half1 : arr[int[bitwise[64]] $post @prover] = bitwise_vec_to_bitwise_vec(x[.. new_xlen]);
+        let half2 : arr[int[bitwise[64]] $post @prover] = bitwise_vec_to_bitwise_vec(x[start2 ..]);
+        let choose_half = sieve fn (h1,h2) { h1 + is_2nd * (h1 + h2) };
+        let chosen_half = choose_half.(half1, half2);
+        let chosen_half : arr[int[bitwise[8]] $post @prover] = bitwise_vec_to_bitwise_vec(chosen_half);
+        let chosen_half = chosen_half[.. new_xlen]; // remove the padding
+        let new_start = if (is_2nd_bool) { start - start2 as @prover } else { start };
+        slice_by_prover_index(chosen_half, new_start, len)
+    } else {
+        dbg_assert(xlen == len);
+        x
+    }
+}
+
+// Input and output are each considered as 8 bytes of 8 bits each,
+// the ith byte of the output is 1 if all bits in the ith byte of the input are zero and 0 otherwise.
+fn is_zero_bitwise8x8(x : int[bitwise[64]] $post @prover) -> int[bitwise[64]] $post @prover {
+    // flip all bits
+    let t1 = x + 0xffffffffffffffff;
+    // check if all bits in a byte are 1 by multiplying all bits in each byte together
+    let t2 = t1 * 0x0f0f0f0f0f0f0f0f * shrc_post(t1, 4);
+    let t3 = t2 * shrc_post(t2, 2);
+    let t4 = t3 * shrc_post(t3, 1);
+    t4
+}
+
+// assumes each input byte is 0 or 1 and extends this bit to all bits of the byte
+fn extend_bit_8x8(x : int[bitwise[64]] $post @prover) -> int[bitwise[64]] $post @prover {
+    let t1 = x + shlc_post(x, 1);
+    let t2 = t1 + shlc_post(t1, 2);
+    let t3 = t2 + shlc_post(t2, 4);
+    t3
+}
+
+fn is_symbol(symbol : string $pre @public, x : arr[int[bitwise[64]] $post @prover]) -> arr[int[bitwise[64]] $post @prover]
+    where
+        PostRing[bitwise[64]],
+        Vectorization
+{
+    let c1 : int[bitwise[64]] $pre @public = ((string_to_list_bitwise(symbol))[0]) as int[bitwise[64]];
+    // copy the symbol to all 8 bytes
+    let c2 = shlc_pre(c1, 8) + c1;
+    let c3 = shlc_pre(c2, 16) + c2;
+    let c4 = shlc_pre(c3, 32) + c3;
+    let c = (wire { c4 }) as @prover;
+    let f = sieve fn (y : int[bitwise[64]] $post @prover) { is_zero_bitwise8x8(y + c) };
+    f.(x)
+}
+
+pub fn extract_json_field(field_name : string $pre @public, x : arr[int[bitwise[8]] $post @prover], field_len : u64 $pre @public) -> arr[int[bitwise[8]] $post @prover]
+    where
+        PostRing[bitwise[8]],
+        PostRing[bitwise[64]],
+        PostConvertible[bitwise[8],bitwise[64]],
+        PostConvertible[bitwise[64],bitwise[8]],
+        Vectorization
+{
+    let quote_str : list[int[bitwise[8]] $pre @public] = string_to_list_bitwise("\34");
+    let quoted_name : list[int[bitwise[8]] $pre @public] = append(quote_str, append(string_to_list_bitwise(field_name), quote_str));
+    let len = length(quoted_name) + 4 + field_len;
+    dbg_assert(length(x) >= len);
+
+    // prover finds the starting index of the field locally
+    let quoted_name_as_prover = quoted_name as @prover;
+    let quoted_name_pre_prover = for i in 0 .. length(quoted_name) as @prover { quoted_name_as_prover[i] as u8 };
+    let x_as_prover : list[int[bitwise[8]] $pre @prover] $pre @prover = thaw(x) as @prover;
+    let x_pre_prover = for i in 0 .. length(x) as @prover { x_as_prover[i] as $pre as u8 };
+    let mut start : u64 $pre @prover = length(x_pre_prover);
+    for i in 0 : u64 $pre @prover .. length(x_pre_prover) - len as @prover + 1 {
+        let mut found : bool $pre @prover = true;
+        for j in 0 .. length(quoted_name_pre_prover) {
+            if (x_pre_prover[i+j] != quoted_name_pre_prover[j]) {
+                found = false;
+                break;
+            }
+        }
+        if (found) {
+            start = i;
+            break;
+        }
+        {}
+    }
+    if (start == length(x_pre_prover)) {
+        dbg_print("ERROR: JSON field not found: " ++ field_name);
+        dbg_assert(false : bool $pre @prover);
+    }
+
+    dbg_print("start: " ++ to_string(start));
+    let y = slice_by_prover_index(x, start, len);
+    print_as_string(for i in 0 .. length(y) { y[i] as $pre as u8 });
+
+    // assert that y starts with quoted_name
+    for i in 0 .. length(quoted_name) {
+        assert_zero(y[i] + (wire { quoted_name[i] }) as @prover);
+    }
+
+    // assert that the next symbols are ':' and '"'
+    let colon = (string_to_list_bitwise(":"))[0];
+    let colon_post = (wire { colon }) as @prover;
+    assert_zero(y[length(quoted_name)] + colon_post);
+    let quote = quote_str[0];
+    let quote_post = (wire { quote }) as @prover;
+    assert_zero(y[length(quoted_name) + 1] + quote_post);
+
+    let s = unslice(y[length(quoted_name) + 2 ..]);
+    let slen = length(s);
+    let s64 : arr[int[bitwise[64]] $post @prover] = bitwise_vec_to_bitwise_vec(s);
+
+    let is_backslash = is_symbol("\\", s64);
+    let is_backslash : arr[int[bitwise[8]] $post @prover] = bitwise_vec_to_bitwise_vec(is_backslash);
+    let is_quote = is_symbol("\34", s64);
+    let is_quote : arr[int[bitwise[8]] $post @prover] = bitwise_vec_to_bitwise_vec(is_quote);
+    let is_comma = is_symbol(",", s64);
+    let is_right_brace = is_symbol("}", s64);
+
+    let rec is_escaped =
+        for i in 0 .. slen {
+            if (i == 0) {
+                0
+            } else {
+                is_backslash[i-1] * (1 + is_escaped[i-1])
+            }
+        };
+    let is_unescaped_quote = for i in 0 .. slen { is_quote[i] * (1 + is_escaped[i]) };
+    let rec unescaped_quote_has_occured =
+        for i in 0 .. slen {
+            if (i == 0) {
+                is_unescaped_quote[i]
+            } else {
+                unescaped_quote_has_occured[i-1] + is_unescaped_quote[i] + unescaped_quote_has_occured[i-1] * is_unescaped_quote[i]
+            }
+        };
+
+    // Assert that an unescaped '"' occurs and is followed by a ',' or '}'
+    assert_zero(1 + unescaped_quote_has_occured[slen-1]);
+    let is_comma_or_right_brace_required =
+        for i in 0 .. slen {
+            if (i == 0) {
+                0
+            } else if (i == 1) {
+                unescaped_quote_has_occured[0]
+            } else {
+                unescaped_quote_has_occured[i-1] * (1 + unescaped_quote_has_occured[i-2])
+            }
+        };
+    let is_comma_or_right_brace_required : arr[int[bitwise[64]] $post @prover] = bitwise_vec_to_bitwise_vec(freeze(is_comma_or_right_brace_required));
+    let unescaped_quote_has_occured : arr[int[bitwise[64]] $post @prover] = bitwise_vec_to_bitwise_vec(freeze(unescaped_quote_has_occured));
+    let f =
+        sieve fn (req, ic, irb, occ, s_i) {
+            assert_zero(req * (ic + irb + 0x0101010101010101));
+            // replace all characters starting from the first unescaped quote by NUL characters
+            s_i * extend_bit_8x8(occ + 0x0101010101010101)
+        };
+    let res : arr[int[bitwise[64]] $post @prover] = f.(is_comma_or_right_brace_required, is_comma, is_right_brace, unescaped_quote_has_occured, s64);
+    let res : arr[int[bitwise[8]] $post @prover] = bitwise_vec_to_bitwise_vec(res);
+
+    unslice(res[0 .. slen - 2])
+}

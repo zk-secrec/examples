@@ -1,0 +1,69 @@
+/*
+ * Copyright 2026 Cybernetica AS
+ *
+ * Redistribution and use in source and binary forms, with or without modification, are permitted provided that the following conditions are met:
+ * 1. Redistributions of source code must retain the above copyright notice, this list of conditions and the following disclaimer.
+ * 2. Redistributions in binary form must reproduce the above copyright notice, this list of conditions and the following disclaimer in the documentation and/or other materials provided with the distribution.
+ * 3. Neither the name of the copyright holder nor the names of its contributors may be used to endorse or promote products derived from this software without specific prior written permission.
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS “AS IS” AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ */
+ 
+// ./runrust zkbpp/zk-anon-auth/Sha256Test.zksc -i zkbpp/zk-anon-auth/Sha256_instance.json -w zkbpp/zk-anon-auth/Sha256_witness.json -e zkbpp/zk-anon-auth/zk-anon-auth.rs -c zkbpp/zkbpp.ccc --zkbpp -o zkbpp/generated
+// ./runrust zkbpp/zk-anon-auth/Sha256Test.zksc -i zkbpp/zk-anon-auth/Sha256_instance.json -e zkbpp/zk-anon-auth/zk-anon-auth.rs -c zkbpp/zkbpp.ccc --zkbpp -o zkbpp/generated-verifier --verifier
+
+use Sha256Post::*;
+use Std::*;
+
+fn main()
+    where
+        PostRing[bitwise[8]],
+        PostRing[bitwise[32]],
+        PostRing[bitwise[64]],
+        PostConvertible[bitwise[8],bitwise[32]],
+        PostConvertible[bitwise[32],plain[4294967296]],
+        PostConvertible[plain[4294967296],bitwise[32]],
+        PostConvertible[bitwise[32],bitwise[64]],
+        PostConvertible[bitwise[64],bitwise[32]],
+        Vectorization
+{
+    let dummy : int[bitwise[64]] $post @prover = wire { 0 };
+    let h_init : BitMatrixPost = get_h_init();
+    let k0 = get_round_k_transposed();
+    let k = for i in 0 .. length(k0) {
+        (wire { k0[i] as int[bitwise[64]] }) as @prover
+    };
+
+    ////let msg_block_pre : list[int[bitwise[32]] $pre @prover] = [0x80000000, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    //let msg_block_pre : list[u32 $pre @prover] $pre @prover = get_witness("msg_block");
+    //let msg_block : BitMatrixPost = for i in 0 .. 16 { wire { msg_block_pre[i as @prover] as int[bitwise[32]] } };
+    //for i in 0 : u64 $pre @public .. 31 {
+    //    let h_out = sha256_block_post(k, h_init, msg_block);
+    //    {}
+    //}
+    //let h_out = sha256_block_post(k, h_init, msg_block);
+    //for i in 0 .. length(h_out) {
+    //    dbg_print(to_string(h_out[i] as $pre));
+    //}
+
+    let msg_pre : list[u8 $pre @prover] $pre @prover = get_witness("msg");
+    dbg_print(to_string(length(msg_pre)));
+    let msg : list[int[bitwise[8]] $post @prover] = for i in 0 .. 2000 { wire { msg_pre[i as @prover] as int[bitwise[8]] } };
+    let h_out = sha256(k, h_init, msg);
+
+    let expected_hash_pre : list[u32 $pre @verifier] $pre @verifier = get_instance("expected_hash");
+    let expected_hash : list[int[bitwise[32]] $post @prover] = for i in 0 .. 8 { (wire { expected_hash_pre[i as @verifier] as int[bitwise[32]] }) as @prover };
+    for i in 0 .. length(h_out) {
+        assert_zero(h_out[i] - expected_hash[i]);
+    }
+
+    let mut h_out_str : string $pre @prover = "hash: ";
+    for i in 0 .. length(h_out) {
+        dbg_print(to_string(h_out[i] as $pre));
+        if (i > 0) {
+            h_out_str = h_out_str ++ ", ";
+        }
+        h_out_str = (h_out_str ++ "\34") ++ (to_string(h_out[i] as $pre) ++ "\34");
+    }
+    dbg_print(h_out_str);
+    {}
+}

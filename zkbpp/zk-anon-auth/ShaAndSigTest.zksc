@@ -1,0 +1,80 @@
+/*
+ * Copyright 2026 Cybernetica AS
+ *
+ * Redistribution and use in source and binary forms, with or without modification, are permitted provided that the following conditions are met:
+ * 1. Redistributions of source code must retain the above copyright notice, this list of conditions and the following disclaimer.
+ * 2. Redistributions in binary form must reproduce the above copyright notice, this list of conditions and the following disclaimer in the documentation and/or other materials provided with the distribution.
+ * 3. Neither the name of the copyright holder nor the names of its contributors may be used to endorse or promote products derived from this software without specific prior written permission.
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS “AS IS” AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ */
+
+// ./runrust zkbpp/zk-anon-auth/ShaAndSigTest.zksc -p zkbpp/zk-anon-auth/ShaAndSig_public.json -i zkbpp/zk-anon-auth/ShaAndSig_instance.json -w zkbpp/zk-anon-auth/ShaAndSig_witness.json -e zkbpp/zk-anon-auth/zk-anon-auth.rs -c zkbpp/zkbpp.ccc --zkbpp -o zkbpp/generated
+// ./runrust zkbpp/zk-anon-auth/ShaAndSigTest.zksc -p zkbpp/zk-anon-auth/ShaAndSig_public.json -i zkbpp/zk-anon-auth/ShaAndSig_instance.json -e zkbpp/zk-anon-auth/zk-anon-auth.rs -c zkbpp/zkbpp.ccc --zkbpp -o zkbpp/generated-verifier --verifier
+
+use Common::*;
+use Sha256Post::*;
+use sig::*;
+use Std::*;
+
+fn main()
+    where
+        Field[P],
+        Field[Q],
+        PostConvertible[plain[Q],bitwise[384]],
+        PostConvertible[bitwise[384],plain[P]],
+        PostConvertible[bitwise[384],plain[Q]],
+        PostRing[bitwise[8]],
+        PostRing[bitwise[32]],
+        PostRing[bitwise[64]],
+        PostRing[bitwise[384]],
+        PostConvertible[bitwise[8],bitwise[32]],
+        PostConvertible[bitwise[32],plain[4294967296]],
+        PostConvertible[plain[4294967296],bitwise[32]],
+        PostConvertible[bitwise[32],bitwise[64]],
+        PostConvertible[bitwise[64],bitwise[32]],
+        PostConvertible[bitwise[32],bitwise[384]],
+        Vectorization
+{
+    let dummy : int[bitwise[64]] $post @prover = wire { 0 };
+    let h_init : BitMatrixPost = get_h_init();
+    let k0 = get_round_k_transposed();
+    let k = for i in 0 .. length(k0) {
+        (wire { k0[i] as int[bitwise[64]] }) as @prover
+    };
+
+    let msg_pre : list[u8 $pre @prover] $pre @prover = get_witness("msg");
+    dbg_print(to_string(length(msg_pre)));
+    let msg : list[int[bitwise[8]] $post @prover] = for i in 0 .. 2000 { wire { msg_pre[i as @prover] as int[bitwise[8]] } };
+    let h_out = sha256(k, h_init, msg);
+
+    let mut h_out_str : string $pre @prover = "hash: ";
+    for i in 0 .. length(h_out) {
+        dbg_print(to_string(h_out[i] as $pre));
+        if (i > 0) {
+            h_out_str = h_out_str ++ ", ";
+        }
+        h_out_str = (h_out_str ++ "\34") ++ (to_string(h_out[i] as $pre) ++ "\34");
+    }
+    dbg_print(h_out_str);
+
+    let h2 = for i in 0 .. length(h_out) { h_out[i] as int[bitwise[384]] };
+    let rec h3 =
+        for i in 0 .. length(h_out) {
+            if (i == 0) {
+                h2[i]
+            } else {
+                shlc_post(h3[i-1], 32) + h2[i]
+            }
+        };
+
+	let signature_pre : tuple[uint[Q] $pre @prover, uint[Q] $pre @prover] = get_witness("signature");
+	let pubkey_pre : tuple[uint[P] $pre @verifier, uint[P] $pre @verifier] = get_instance("pubkey");
+
+	let signature = ( wire { signature_pre.0 }, wire { signature_pre.1 } );
+	let pubkey = ( (wire { pubkey_pre.0 }) as @prover, (wire { pubkey_pre.1 }) as @prover );
+
+    let hash2 = h3[length(h_out)-1] as uint[Q];
+    dbg_print(to_string(hash2 as $pre));
+	assert_checksig(hash2, pubkey, signature);
+    {}
+}
