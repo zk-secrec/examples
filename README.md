@@ -18,6 +18,7 @@ The following examples are in the following folders:
 * `electric-vehicle` folder contains the source code of our "electric vehicle demo app". It consists of several variations of checking that a geographic trajectory is long enough, while being located mostly in a given geographic area.
 * `highway-tax` folder contains a statement stating that a geographic trajectory has followed a certain highway for no more than a given distance. It is a spinoff use case of the electric vehicle demo.
 * `medical-checks` folder contains an example of checking [credentials](https://en.wikipedia.org/wiki/Verifiable_credentials) (in the [mDL format](https://en.wikipedia.org/wiki/Mobile_driver%27s_license)) in zero-knowledge.
+* `zkbpp` folder contains an example of anonymous authentication to access some resource in blockchain, while using the credentials provided by some external identity provider. It reimplements [zkLogin](https://arxiv.org/abs/2401.11735), includes a ZKP backend based on the MPC-in-the-head technique (a heavily modified version of [ZKB++](https://github.com/isec-tugraz/gzkbpp)), and manages to create the proof with efficiency that makes the proof generation feasible to be run in user's web browser.
 
 Each folder contains its own `README.md` file, describing the example or examples in this folder.
 
